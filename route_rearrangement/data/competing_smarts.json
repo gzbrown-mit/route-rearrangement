@@ -1,0 +1,17 @@
+{
+  "amine_primary_aliphatic": "[NX3;H2;!$(NC=O);!$(N=*);!$([N+]);!$(N[a])][CX4]",
+  "amine_secondary_aliphatic": "[NX3;H1;!$(NC=O);!$(N=*);!$([N+])]([CX4])[CX4]",
+  "amine_aromatic": "[NX3;H1,H2;!$(NC=O);!$(N=*);!$([N+])][c]",
+  "alcohol_aliphatic": "[OX2H][CX4]",
+  "phenol": "[OX2H][c]",
+  "thiol": "[SX2H]",
+  "carboxylic_acid": "[CX3](=[OX1])[OX2H1]",
+  "ester": "[CX3](=[OX1])[OX2][CX4]",
+  "sulfonate_ester": "[#6][OX2][SX4](=[OX1])(=[OX1])[#6]",
+  "alkyl_halide": "[CX4][Cl,Br,I]",
+  "aryl_halide": "[c][Cl,Br,I]",
+  "aldehyde": "[CX3H1](=[OX1])[#6]",
+  "ketone": "[#6][CX3](=[OX1])[#6]",
+  "boc_carbamate": "[NX3][CX3](=[OX1])[OX2][CX4]",
+  "amide_NH": "[NX3;H1,H2][CX3](=[OX1])[#6]"
+}

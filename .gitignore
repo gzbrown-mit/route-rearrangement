@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Third-party checkout (clone separately; see README — set PATHWAY_RANKER_PATH)
+external/
+
+# Generated run outputs (reproducible via run.py / score.py / gui)
+results/
+results_*/
+candidates*.jsonl
+*.html
+_imgs_*/

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "route_rearrangement"
+version = "0.1.0"
+description = "Enumerate all valid orderings of a synthesis route's steps and materialize each via backward template re-application"
+requires-python = ">=3.9"
+dependencies = [
+    "rdkit",
+    "rdchiral",
+    "networkx",
+    "pyyaml",
+    "numpy",
+]
+
+# Optional extras: route-ranking metrics (torch for the Tree-LSTM ranker and the
+# template-relevance plausibility model; rxnutils for competing-site detection) and the
+# PyQt viewer.
+[project.optional-dependencies]
+metrics = ["torch", "reaction-utils"]
+gui = ["PyQt5", "graphviz", "matplotlib", "pillow", "pandas"]
+
+[tool.setuptools]
+packages = [
+    "route_rearrangement",
+    "route_rearrangement.metrics",
+    "route_rearrangement.gui",
+]
+
+[tool.setuptools.package-data]
+route_rearrangement = ["data/*.json"]
