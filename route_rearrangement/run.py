@@ -37,14 +37,18 @@ from synthesis_extraction.dependency.schedule import lattice_for
 
 def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 500,
                   beam: int = 3, max_outcomes: int = 20, max_accepted: int = 200,
-                  with_fg: bool = True, matrix=None, provenance=None):
-    """Run the full pipeline on one route.  Returns ``(summary, records, failures)``."""
+                  with_fg: bool = True, matrix=None, provenance=None, full_graph=None):
+    """Run the full pipeline on one route.  Returns ``(summary, records, failures)``.
+
+    *full_graph* — a pre-built unified-map graph (from :func:`build_route_graph`); when given
+    it is reused instead of rebuilding (the corpus pipeline builds it once for its
+    linear/convergent triage and passes it here)."""
     summary = {"tree_id": tree_id, "status": "ok", "n_steps": 0, "n_orders": 0,
                "orderings_tried": 0, "accepted": 0, "duplicates": 0,
                "identity_roundtrip": False, "prune_reasons": Counter()}
     records, failures = [], []
 
-    full = build_route_graph(tree_graph, tree_id)
+    full = full_graph if full_graph is not None else build_route_graph(tree_graph, tree_id)
     if full is None or full["qc"]["disconnected"]:
         summary["status"] = "unmappable_or_disconnected"
         return summary, records, failures

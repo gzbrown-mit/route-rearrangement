@@ -40,6 +40,15 @@ Everything runs in the existing `trimmed-trees` conda env from this directory:
 PY=~/anaconda3/envs/trimmed-trees/bin/python
 CORPUS=~/synthesis_extraction/synthesis_extraction/data/slice_0-1000/trees.jsonl
 
+# 0. run the WHOLE dataset in one job (enumerate → materialize → score for every route)
+#    keeps linear trees; convergent/branching routes are skipped AND counted, not hidden.
+N1=~/synthesis_extraction/synthesis_extraction/data/paroutes/n1/trees.jsonl
+$PY -m route_rearrangement.pipeline --corpus $N1 --out-dir results_n1/   # add --limit N to test
+#    -> results_n1/{scored.jsonl, routes.jsonl, failures.jsonl, stats.jsonl, summary.json}
+#    summary.json.counts reports linear vs convergent_skipped vs unmappable coverage.
+
+# ...or drive the stages individually:
+
 # 1. rank routes by reordering modularity (most valid orderings / commutable pairs)
 $PY -m route_rearrangement.select_examples --corpus $CORPUS --top 20 --out candidates.jsonl
 
