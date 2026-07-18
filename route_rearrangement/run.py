@@ -27,7 +27,7 @@ from .filters import dedup_key, evaluate
 from .materialize import materialize_ordering, replay_identity
 from .schema import failure_record, route_record, write_jsonl
 from .search import materialize_all_dfs
-from .templates import extract_step_templates, is_linear
+from .templates import extract_step_templates, is_linear, original_parents
 from synthesis_extraction.load_trees import iter_trees
 from synthesis_extraction.dependency.route_graph import build_route_graph
 from synthesis_extraction.dependency.analyze import dependency_graph_from_full_graph
@@ -37,15 +37,23 @@ from synthesis_extraction.dependency.schedule import lattice_for
 
 def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 500,
                   beam: int = 3, max_outcomes: int = 20, max_accepted: int = 200,
-                  with_fg: bool = True, matrix=None, provenance=None, full_graph=None):
+                  with_fg: bool = True, matrix=None, provenance=None, full_graph=None,
+                  migration: bool = True):
     """Run the full pipeline on one route.  Returns ``(summary, records, failures)``.
 
     *full_graph* — a pre-built unified-map graph (from :func:`build_route_graph`); when given
     it is reused instead of rebuilding (the corpus pipeline builds it once for its
-    linear/convergent triage and passes it here)."""
+    linear/convergent triage and passes it here).
+
+    *migration* — allow orderings that move a coupling earlier than some of its branches'
+    steps, so those steps run on the combined molecule (convergence-point migration).
+    When ``False``, the original tree's child→parent pairs are added as constraints:
+    branches may still interleave, but every fragment is fully assembled before its
+    coupling (topology-preserving mode — the validation harness)."""
     summary = {"tree_id": tree_id, "status": "ok", "n_steps": 0, "n_orders": 0,
                "orderings_tried": 0, "accepted": 0, "duplicates": 0,
-               "identity_roundtrip": False, "prune_reasons": Counter()}
+               "identity_roundtrip": False, "is_linear": True,
+               "prune_reasons": Counter()}
     records, failures = [], []
 
     full = full_graph if full_graph is not None else build_route_graph(tree_graph, tree_id)
@@ -53,11 +61,10 @@ def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 5
         summary["status"] = "unmappable_or_disconnected"
         return summary, records, failures
     summary["n_steps"] = full["qc"]["n_steps"]
-    if not is_linear(full):
-        summary["status"] = "not_linear"
-        return summary, records, failures
+    summary["is_linear"] = is_linear(full)
 
     templates = extract_step_templates(full)
+    orig_parents = original_parents(full)
     dep = dependency_graph_from_full_graph(full, tree_id)
     incidental = dep.incidental_order()
 
@@ -68,7 +75,8 @@ def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 5
         summary["detail"] = replay.detail
         return summary, records, failures
 
-    lat = lattice_for(dep)
+    tree_pairs = [(int(c), int(p)) for c, p in full.get("edges", [])]
+    lat = lattice_for(dep) if migration else lattice_for(dep, extra_constraints=tree_pairs)
     summary["n_orders"] = lat.count()
 
     seen_routes = set()
@@ -80,7 +88,8 @@ def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 5
                 summary["prune_reasons"][route.status] += 1
                 failures.append(failure_record(tree_id, route, ordering_index=ordering_index))
                 continue
-            flags = evaluate(route, templates, matrix=matrix, with_fg=with_fg)
+            flags = evaluate(route, templates, matrix=matrix, with_fg=with_fg,
+                             orig_parents=orig_parents)
             if flags is None:
                 summary["prune_reasons"]["failed_hard_gate"] += 1
                 continue
@@ -100,7 +109,8 @@ def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 5
     if engine == "dfs":
         for ordering_index, (ordering, variants) in enumerate(
                 materialize_all_dfs(full, templates, dep, cap=cap, beam=beam,
-                                    max_outcomes=max_outcomes)):
+                                    max_outcomes=max_outcomes,
+                                    extra_constraints=() if migration else tree_pairs)):
             summary["orderings_tried"] += 1
             handle_results(ordering_index, ordering, variants)
             summary["accepted"] = len(records)
@@ -139,6 +149,9 @@ def main(argv=None) -> int:
     ap.add_argument("--max-outcomes", type=int, default=20)
     ap.add_argument("--max-accepted", type=int, default=200)
     ap.add_argument("--no-fg", action="store_true", help="skip fg_risk soft flags")
+    ap.add_argument("--no-migration", action="store_true",
+                    help="topology-preserving mode: branches interleave but every "
+                         "fragment is fully assembled before its coupling")
     ap.add_argument("--out-dir", default="results")
     args = ap.parse_args(argv)
 
@@ -179,7 +192,8 @@ def main(argv=None) -> int:
             summary, records, failures = process_route(
                 tid, tg, engine=args.engine, cap=args.cap, beam=args.beam,
                 max_outcomes=args.max_outcomes, max_accepted=args.max_accepted,
-                with_fg=not args.no_fg, provenance=provenance)
+                with_fg=not args.no_fg, provenance=provenance,
+                migration=not args.no_migration)
             for r in records:
                 write_jsonl(routes_fh, r)
             for f in failures:

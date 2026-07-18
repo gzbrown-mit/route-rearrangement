@@ -32,6 +32,8 @@ def route_record(tree_id: str, route: MaterializedRoute, *, ordering_index: int,
                 "n_outcomes": r.n_outcomes,
                 "exact_side_match": r.exact_side_match,
                 "sim_score": round(r.sim_score, 4),
+                "parent_step_id": r.parent_step_id,
+                "synth_precursors": r.synth_precursors,
             }
             for r in route.steps
         ],
@@ -57,7 +59,11 @@ def failure_record(tree_id: str, route: MaterializedRoute, *, ordering_index: in
 
 def route_from_record(record: dict) -> MaterializedRoute:
     """Reconstruct a :class:`MaterializedRoute` from a ``routes.jsonl`` record (for the
-    GUI renderer, which needs the route's step SMILES)."""
+    GUI renderer, which needs the route's step SMILES).  Records written before the
+    frontier engine carry no parent pointers — those routes are linear, so the parent
+    of position *k* is the step at position *k+1*."""
+    ordered = sorted(record["steps"], key=lambda s: s["position"])
+    step_at = {s["position"]: s["orig_step_id"] for s in ordered}
     steps = [
         StepRecord(
             position=s["position"], orig_step_id=s["orig_step_id"],
@@ -66,8 +72,12 @@ def route_from_record(record: dict) -> MaterializedRoute:
             side_reactants=list(s["side_reactants"]), new_product=s["new_product"],
             outcome_rank=s["outcome_rank"], n_outcomes=s["n_outcomes"],
             exact_side_match=s["exact_side_match"], sim_score=s["sim_score"],
+            parent_step_id=s.get("parent_step_id", step_at.get(s["position"] + 1)),
+            synth_precursors=list(s.get("synth_precursors")
+                                  or ([s["chain_precursor"]] if s.get("chain_precursor")
+                                      else [])),
         )
-        for s in sorted(record["steps"], key=lambda s: s["position"])
+        for s in ordered
     ]
     return MaterializedRoute(
         ordering=record["ordering"], status=record.get("status", "ok"),

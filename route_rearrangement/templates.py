@@ -18,6 +18,7 @@ retro-only (``retro_identity_ok``).
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Dict, List, Optional, Set
@@ -126,9 +127,10 @@ class StepTemplate:
     orig_rxn: str                      # unified-map reactants>reagents>products
     retro_smarts: Optional[str]        # "product_side>>reactant_side"; None if extraction failed
     orig_product: Optional[str]        # canonical map-free main product
-    orig_chain_precursor: Optional[str]  # child step's main product among reactants; None for deepest step
+    orig_chain_precursor: Optional[str]  # sole synthesized precursor (linear steps); None otherwise
     orig_side_reactants: List[str] = field(default_factory=list)  # canonical map-free (multiset)
     orig_reactants: List[str] = field(default_factory=list)       # every reactant fragment, canonical map-free
+    orig_synth_precursors: List[str] = field(default_factory=list)  # child steps' main products (multiset)
     retro_identity_ok: bool = False    # retro template reproduces original reactants on original product
     extract_error: str = ""
 
@@ -164,16 +166,17 @@ def _retro_identity_ok(retro_smarts: str, product_smi: str,
 def extract_step_templates(full_graph: dict) -> Dict[int, StepTemplate]:
     """A :class:`StepTemplate` for every node of a unified-map ``full_graph``.
 
-    The chain precursor of a step is the reactant equal (map-free) to its child's main
-    product; a step with no child (the deepest step of a linear route) has none — all of
-    its reactants are starting materials.
+    The synthesized precursors of a step are the reactants equal (map-free) to its
+    children's main products — one for a linear step, two or more for a convergent
+    coupling.  A step with no child (a leaf/branch-tip step) has none — all of its
+    reactants are starting materials.
     """
     nodes = {int(n["id"]): n for n in full_graph.get("nodes", [])}
     children: Dict[int, List[int]] = {}
     for c, p in full_graph.get("edges", []):
         children.setdefault(int(p), []).append(int(c))
 
-    # map-free main product per node, for chain-precursor identification
+    # map-free main product per node, for synth-precursor identification
     product_of: Dict[int, Optional[str]] = {}
     for nid, n in nodes.items():
         _, pb = split_reaction(n.get("SMILES", ""))
@@ -187,15 +190,15 @@ def extract_step_templates(full_graph: dict) -> Dict[int, StepTemplate]:
         reactant_frags = [canonicalize_smiles(f) for f in (rb or "").split(".") if f]
         reactant_frags = [f for f in reactant_frags if f]
 
-        chain = None
-        kids = children.get(nid, [])
-        if len(kids) == 1:
-            child_prod = product_of.get(kids[0])
-            if child_prod is not None and child_prod in reactant_frags:
-                chain = child_prod
+        # every child's product found among the reactants is a synthesized precursor;
+        # what remains is the step's true (purchasable) side-reactant multiset
+        synth: List[str] = []
         side = list(reactant_frags)
-        if chain is not None:
-            side.remove(chain)  # one occurrence — side is a multiset
+        for kid in children.get(nid, []):
+            child_prod = product_of.get(kid)
+            if child_prod is not None and child_prod in side:
+                synth.append(child_prod)
+                side.remove(child_prod)  # one occurrence per child — side is a multiset
 
         retro = _extract_retro_smarts(rxn, nid)
         tpl = StepTemplate(
@@ -204,9 +207,10 @@ def extract_step_templates(full_graph: dict) -> Dict[int, StepTemplate]:
             orig_rxn=rxn,
             retro_smarts=retro,
             orig_product=product_of.get(nid),
-            orig_chain_precursor=chain,
+            orig_chain_precursor=synth[0] if len(synth) == 1 else None,
             orig_side_reactants=side,
             orig_reactants=reactant_frags,
+            orig_synth_precursors=synth,
             extract_error="" if retro else "template_extraction_failed",
         )
         if retro and tpl.orig_product:
@@ -217,8 +221,27 @@ def extract_step_templates(full_graph: dict) -> Dict[int, StepTemplate]:
 
 def is_linear(full_graph: dict) -> bool:
     """True iff every node has at most one child (each step's non-chain reactants are
-    leaves/purchasable) — the v1 topology gate."""
+    leaves/purchasable).  No longer a processing gate — used for triage/reporting."""
     n_children: Dict[int, int] = {}
     for c, p in full_graph.get("edges", []):
         n_children[int(p)] = n_children.get(int(p), 0) + 1
     return all(v <= 1 for v in n_children.values())
+
+
+def original_parents(full_graph: dict) -> Dict[int, Optional[int]]:
+    """``{step_id: parent_step_id}`` of the original tree (root's parent is ``None``)."""
+    parent: Dict[int, Optional[int]] = {int(n["id"]): None
+                                        for n in full_graph.get("nodes", [])}
+    for c, p in full_graph.get("edges", []):
+        parent[int(c)] = int(p)
+    return parent
+
+
+def route_sm_budget(templates: Dict[int, StepTemplate]) -> "Counter":
+    """Multiset of the route's purchasable starting materials (all steps' side
+    reactants).  Order-invariant: any valid rearrangement consumes the same blocks,
+    just at different times — the frontier walk uses this as its SM budget."""
+    budget: Counter = Counter()
+    for tpl in templates.values():
+        budget.update(tpl.orig_side_reactants)
+    return budget

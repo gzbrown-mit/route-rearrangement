@@ -1,35 +1,42 @@
 """Suffix-sharing DFS engine over all valid orderings.
 
 Working backward from the target, orderings that share their final steps share every
-intermediate along that suffix.  The naive engine (:func:`materialize_ordering` per
-ordering) recomputes each shared suffix once per ordering; this engine walks the *trie*
-of reversed orderings instead: a DFS over "which not-yet-undone step was performed
-last", where a step qualifies iff it is a **maximal** element of the remaining partial
-order (no constraint requires it before a remaining step).  Each trie node's beam
-states are computed once (via the same :func:`materialize.advance_states` the naive
+frontier intermediate along that suffix.  The naive engine (:func:`materialize_ordering`
+per ordering) recomputes each shared suffix once per ordering; this engine walks the
+*trie* of reversed orderings instead: a DFS over "which not-yet-undone step was
+performed last", where a step qualifies iff it is a **maximal** element of the remaining
+partial order (no constraint requires it before a remaining step).  Each trie node's
+beam states are computed once (via the same :func:`materialize.advance_states` the naive
 engine uses, so the accepted-route set is identical), and a dead suffix prunes every
 ordering under it in one stroke — such a pruned subtree is reported as a single
 representative failure, not one failure per ordering.
+
+*extra_constraints* narrows the explored orderings beyond the dependency poset — the
+topology-preserving (no-migration) mode passes the original tree's child→parent pairs,
+so every branch stays fully assembled before its coupling.
 """
 
 from __future__ import annotations
 
-from typing import Dict, FrozenSet, Iterator, List, Set, Tuple
+from typing import Dict, FrozenSet, Iterable, Iterator, List, Set, Tuple
 
 from .materialize import (
     MaterializedRoute,
+    OpenMol,
     _State,
     advance_states,
     check_templates,
     finalize_states,
+    frontier_smiles,
     route_target,
 )
-from .templates import StepTemplate
+from .templates import StepTemplate, route_sm_budget
 
 
 def materialize_all_dfs(full_graph: dict, templates: Dict[int, StepTemplate], dep, *,
-                        cap: int = 500, beam: int = 3,
-                        max_outcomes: int = 20) -> Iterator[Tuple[List[int], List[MaterializedRoute]]]:
+                        cap: int = 500, beam: int = 3, max_outcomes: int = 20,
+                        extra_constraints: Iterable[Tuple[int, int]] = (),
+                        ) -> Iterator[Tuple[List[int], List[MaterializedRoute]]]:
     """Yield ``(ordering, variants)`` for valid orderings of *dep*'s partial order.
 
     Equivalent accepted set to running :func:`materialize_ordering` on every ordering
@@ -52,6 +59,9 @@ def materialize_all_dfs(full_graph: dict, templates: Dict[int, StepTemplate], de
     for e, l in dep.constraints():
         if e in out_edges:
             out_edges[e].add(l)
+    for e, l in extra_constraints:
+        if int(e) in out_edges:
+            out_edges[int(e)].add(int(l))
 
     step_no = dep.step_no
     yielded = 0
@@ -78,7 +88,7 @@ def materialize_all_dfs(full_graph: dict, templates: Dict[int, StepTemplate], de
                 continue                      # sid must precede a remaining step
             nxt, any_outcome = advance_states(
                 states, templates[sid], position,
-                terminal=position == 1, beam=beam, max_outcomes=max_outcomes)
+                remaining_after=position - 1, beam=beam, max_outcomes=max_outcomes)
             if not nxt:
                 reason = "no_usable_outcome" if any_outcome else "template_no_match"
                 yielded += 1
@@ -86,8 +96,10 @@ def materialize_all_dfs(full_graph: dict, templates: Dict[int, StepTemplate], de
                     ordering=representative(undone + [sid], remaining - {sid}),
                     status=reason, target=target, failed_position=position,
                     failed_step_id=sid,
-                    failure_intermediate=states[0].current if states else target)]
+                    failure_intermediate=frontier_smiles(states, target))]
                 continue
             yield from walk(remaining - {sid}, undone + [sid], nxt)
 
-    yield from walk(frozenset(node_ids), [], [_State(current=target, steps_rev=[])])
+    yield from walk(frozenset(node_ids), [],
+                    [_State(frontier=(OpenMol(target, None),), steps_rev=[],
+                            sm_budget=route_sm_budget(templates))])

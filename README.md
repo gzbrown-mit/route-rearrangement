@@ -14,18 +14,28 @@ materials — by re-applying each step's retro reaction template backward from t
 2. **Backward materialization** (this package, the new "recombination oracle"): for each
    ordering, start at the target and undo the last-performed step first by applying its
    rdchiral retro template to the substrate *as it exists in the rearranged route*
-   ([materialize.py](route_rearrangement/materialize.py)). The outcome splits into the new
-   chain intermediate vs the step's side reactants — building blocks are order-invariant, so
-   they match the original step's side reactants exactly and identify the chain by elimination
-   ([chain.py](route_rearrangement/chain.py)). A template that no longer matches prunes the
-   ordering — the built-in chemical veto.
+   ([materialize.py](route_rearrangement/materialize.py)). The walk carries a **frontier** —
+   the open intermediates not yet disconnected (one molecule for a linear route, several
+   while convergent branches are open). Undoing a step deposits its precursors: building
+   blocks are order-invariant, so they match the original step's side reactants exactly and
+   leave the frontier; synthesized precursors stay open for a later-undone step
+   ([chain.py](route_rearrangement/chain.py)). The new route's **tree topology is emergent**
+   — a coupling undone late (performed early) hands the following steps the combined
+   molecule, so functionalizations migrate onto it (*convergence-point migration*;
+   `--no-migration` keeps every fragment fully assembled before its coupling). A template
+   that no longer matches prunes the ordering — the built-in chemical veto; conservation
+   invariants (the frontier can never exceed the steps left, and must end empty) prune
+   structurally impossible walks.
 3. **Calibration gate**: a route is only trusted if replaying the *original* order through the
-   extracted templates reproduces the original intermediates (`replay_identity`). Routes that
-   fail are skipped and counted.
+   extracted templates reproduces the original intermediates **and the original tree** —
+   products, synthesized-precursor sets, and child→parent edges (`replay_identity`). Routes
+   that fail are skipped and counted.
 4. **Filters** ([filters.py](route_rearrangement/filters.py)): hard gates — RDKit
-   sanitization, chain connectivity (`propagate.disconnected_edges` on the rebuilt route),
-   dedup. Soft flags — `fg_risk` (FG-survival verdicts from the compatibility subsystem on
-   new intermediates), `inexact_side_match`.
+   sanitization, connectivity (`propagate.disconnected_edges` on the rebuilt route tree),
+   dedup. Soft flags — `fg_risk` (FG-survival verdicts on new intermediates against the
+   steps on their path to the root — a parallel branch is a different flask),
+   `inexact_side_match`, `migrated_steps` (steps running on a different substrate than the
+   literature), `sm_mismatch` (starting-material multiset deviates from the original's).
 5. **Engines**: `naive` materializes each lattice ordering independently;
    `dfs` (default, [search.py](route_rearrangement/search.py)) walks the trie of reversed
    orderings — shared backward suffixes are computed once, dead suffixes prune whole subtrees,
@@ -41,11 +51,12 @@ PY=~/anaconda3/envs/trimmed-trees/bin/python
 CORPUS=~/synthesis_extraction/synthesis_extraction/data/slice_0-1000/trees.jsonl
 
 # 0. run the WHOLE dataset in one job (enumerate → materialize → score for every route)
-#    keeps linear trees; convergent/branching routes are skipped AND counted, not hidden.
+#    linear AND convergent trees (--linear-only restores the old skip; --no-migration keeps
+#    fragments fully assembled before their couplings).
 N1=~/synthesis_extraction/synthesis_extraction/data/paroutes/n1/trees.jsonl
 $PY -m route_rearrangement.pipeline --corpus $N1 --out-dir results_n1/   # add --limit N to test
 #    -> results_n1/{scored.jsonl, routes.jsonl, failures.jsonl, stats.jsonl, summary.json}
-#    summary.json.counts reports linear vs convergent_skipped vs unmappable coverage.
+#    summary.json.counts reports linear vs convergent vs unmappable coverage + migration counts.
 
 # ...or drive the stages individually:
 

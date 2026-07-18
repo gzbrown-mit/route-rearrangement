@@ -1,10 +1,11 @@
 """One-shot pipeline over a whole corpus: enumerate → materialize → score, in a single job.
 
-Runs the full workflow on every route of a ``trees.jsonl`` (e.g. PaRoutes ``n1``/``n5``),
-keeping **linear** trees only (convergent/branching routes are skipped and counted, never
-silently dropped).  For each linear route within the step bounds it enumerates the valid
-orderings, materializes each backward, scores them with the metric suite, and streams the
-results to disk so memory stays flat even on 10k-route corpora.
+Runs the full workflow on every route of a ``trees.jsonl`` (e.g. PaRoutes ``n1``/``n5``)
+— **linear and convergent** trees alike (the frontier engine materializes branching
+routes, including convergence-point migration; ``--no-migration`` keeps every fragment
+fully assembled before its coupling).  For each route within the step bounds it
+enumerates the valid orderings, materializes each backward, scores them with the metric
+suite, and streams the results to disk so memory stays flat even on 10k-route corpora.
 
 Outputs (one ``--out-dir``):
 * ``scored.jsonl``   — every accepted rearrangement + its ``metrics`` block;
@@ -48,6 +49,11 @@ def main(argv=None) -> int:
     ap.add_argument("--max-accepted", type=int, default=40, help="max accepted routes per tree")
     ap.add_argument("--beam", type=int, default=3)
     ap.add_argument("--engine", choices=["naive", "dfs"], default="dfs")
+    ap.add_argument("--no-migration", action="store_true",
+                    help="topology-preserving mode: branches interleave but every "
+                         "fragment is fully assembled before its coupling")
+    ap.add_argument("--linear-only", action="store_true",
+                    help="restore the old behavior: skip convergent trees")
     ap.add_argument("--plausibility", action="store_true",
                     help="also run the ~900MB template-relevance metric (slow at scale)")
     ap.add_argument("--no-treelstm", action="store_true")
@@ -62,7 +68,8 @@ def main(argv=None) -> int:
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     provenance = {"corpus": str(args.corpus), "engine": args.engine,
-                  "rdchiral_default_template": True}
+                  "rdchiral_default_template": True,
+                  "migration": not args.no_migration}
     counts: Counter = Counter()
 
     scored_fh = (out / "scored.jsonl").open("w")
@@ -72,9 +79,10 @@ def main(argv=None) -> int:
 
     def _progress():
         print(f"  [{counts['scanned']}] linear={counts['linear']} "
-              f"convergent={counts['convergent_skipped']} "
+              f"convergent={counts['convergent']} "
               f"replay_ok={counts['materialized_ok']} "
-              f"records={counts['scored_records']}", file=sys.stderr)
+              f"records={counts['scored_records']} "
+              f"migrated={counts['migrated_records']}", file=sys.stderr)
 
     try:
         for i, (tid, tg) in enumerate(iter_trees(args.corpus)):
@@ -98,16 +106,20 @@ def main(argv=None) -> int:
             if not (args.min_steps <= n_steps <= args.max_steps):
                 counts["out_of_step_range"] += 1
                 continue
-            if not is_linear(full):
-                counts["convergent_skipped"] += 1     # kept-linear policy: reported, not hidden
+            if is_linear(full):
+                counts["linear"] += 1
+            elif args.linear_only:
+                counts["convergent_skipped"] += 1
                 continue
-            counts["linear"] += 1
+            else:
+                counts["convergent"] += 1
 
             try:
                 summary, records, failures = process_route(
                     tid, tg, full_graph=full, engine=args.engine, cap=args.cap,
                     beam=args.beam, max_accepted=args.max_accepted,
-                    with_fg=not args.no_fg, provenance=provenance)
+                    with_fg=not args.no_fg, provenance=provenance,
+                    migration=not args.no_migration)
             except Exception as exc:  # noqa: BLE001
                 counts["process_error"] += 1
                 print(f"  [{tid}] error: {exc}", file=sys.stderr)
@@ -130,6 +142,8 @@ def main(argv=None) -> int:
                                             if k != "metrics"}) + "\n")
                 scored_fh.write(json.dumps(rec) + "\n")
                 counts["scored_records"] += 1
+                if rec.get("flags", {}).get("migrated_steps"):
+                    counts["migrated_records"] += 1
             try:
                 stats_fh.write(json.dumps(summarize_tree(tid, records)) + "\n")
             except Exception:  # noqa: BLE001
@@ -144,12 +158,15 @@ def main(argv=None) -> int:
 
     _progress()
     print(f"\nDONE. scanned {counts['scanned']} trees -> {out}/")
-    print(f"  linear kept:        {counts['linear']}")
-    print(f"  convergent skipped: {counts['convergent_skipped']}")
+    print(f"  linear:             {counts['linear']}")
+    print(f"  convergent:         {counts['convergent']}")
+    if counts["convergent_skipped"]:
+        print(f"  convergent skipped: {counts['convergent_skipped']}  (--linear-only)")
     print(f"  unmappable:         {counts['unmappable']}")
     print(f"  out of step range:  {counts['out_of_step_range']}")
     print(f"  replay-passed:      {counts['materialized_ok']}")
     print(f"  scored records:     {counts['scored_records']}")
+    print(f"  with migration:     {counts['migrated_records']}")
     return 0
 
 

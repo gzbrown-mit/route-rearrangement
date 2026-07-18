@@ -59,7 +59,9 @@ def carried_complexity(record: dict) -> dict:
             ok = False
             continue
         sizes.append(hp)
-        remaining = n - r.position                 # operations this new mass must survive
+        # operations this new mass must survive: its path to the new tree's root
+        # (linear routes: n - position; a parallel branch is a different flask)
+        remaining = r.n_downstream
         delta = (hp - hs) if hs is not None else 0
         contrib = max(delta, 0) * remaining
         carried += contrib

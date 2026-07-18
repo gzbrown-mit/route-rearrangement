@@ -23,7 +23,8 @@ def test_pipeline_runs_end_to_end(tmp_path):
     counts = summary["counts"]
     assert counts["scanned"] == 40
     # coverage is fully accounted for: every scanned tree lands in exactly one bucket
-    buckets = ("linear", "convergent_skipped", "unmappable", "disconnected",
+    # (convergent trees are now processed, not skipped)
+    buckets = ("linear", "convergent", "unmappable", "disconnected",
                "out_of_step_range")
     assert sum(counts.get(b, 0) for b in buckets) == counts["scanned"]
 

@@ -41,7 +41,10 @@ def _render_core():
 
 def _reactants_of(step: dict) -> List[str]:
     reactants = list(step.get("side_reactants", []))
-    if step.get("chain_precursor"):
+    synth = step.get("synth_precursors")
+    if synth:
+        reactants.extend(synth)
+    elif step.get("chain_precursor"):
         reactants.append(step["chain_precursor"])
     return reactants
 
