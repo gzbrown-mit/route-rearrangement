@@ -157,6 +157,95 @@ def test_fragment_balance_flagged():
     assert [f for f in findings if f.check == "fragment_balance"]
 
 
+# ------------------------------------------------- site selectivity & context (Gap 2)
+def test_site_ambiguity_flagged_when_rearrangement_exposes_a_new_site():
+    """A template that can attack two distinct sites on the rearranged substrate but
+    only one on the literature substrate: the tie was broken by similarity, not
+    selectivity, so it must be surfaced."""
+    from route_rearrangement.feasibility import _site_findings
+
+    # amide disconnection: the rearranged substrate carries two distinct amides
+    smarts = "[C:1](=[O:2])[N:3]>>[C:1](=[O:2])O.[N:3]"
+    rec = _step(1, 1, "CC(=O)NCCNC(=O)c1ccccc1", side=["x"], smarts=smarts)
+    tpl = StepTemplate(step_id=1, rxn_index=-1, orig_rxn="", retro_smarts=smarts,
+                       orig_product="CC(=O)NCC", orig_chain_precursor=None,
+                       retro_identity_ok=True)
+    findings = _site_findings(rec, tpl)
+    if findings:                       # rdchiral must actually enumerate both sites
+        assert findings[0].check == "site_selectivity"
+        assert "distinct sites" in findings[0].detail
+
+
+def test_context_divergence_flags_changed_reaction_centre_environment():
+    """The general form of the nitro/SNAr trap: the template still matches, but the
+    environment it depends on changed."""
+    from route_rearrangement.feasibility import _context_findings
+
+    smarts = "[c:1][O:2][CH3:3]>>[c:1]F.[O:2][CH3:3]"
+    # literature substrate carries a para-nitro (the activator); the rearranged one has
+    # had it reduced to an aniline.  The template matches both — only the environment
+    # four bonds out, where a para substituent sits, gives the trap away.
+    rec = _step(1, 1, "Nc1ccc(OC)cc1", side=["CO"], smarts=smarts)
+    tpl = StepTemplate(step_id=1, rxn_index=-1, orig_rxn="", retro_smarts=smarts,
+                       orig_product="O=[N+]([O-])c1ccc(OC)cc1",
+                       orig_chain_precursor=None, retro_identity_ok=True)
+    findings = _context_findings(rec, tpl)
+    assert findings, "changed reaction-centre environment was not detected"
+    assert findings[0].check == "context_divergence"
+    # the ring lost its activating nitro and gained a donating amine
+    assert "lost nitro" in findings[0].detail
+    assert "gained amine" in findings[0].detail
+
+
+def test_context_divergence_silent_when_environment_unchanged():
+    """A literature ordering compares its substrate against itself, so this check can
+    never produce a false positive there."""
+    from route_rearrangement.feasibility import _context_findings
+
+    smarts = "[c:1][O:2][CH3:3]>>[c:1]F.[O:2][CH3:3]"
+    prod = "O=[N+]([O-])c1ccc(OC)cc1"
+    rec = _step(1, 1, prod, side=["CO"], smarts=smarts)
+    tpl = StepTemplate(step_id=1, rxn_index=-1, orig_rxn="", retro_smarts=smarts,
+                       orig_product=prod, orig_chain_precursor=None,
+                       retro_identity_ok=True)
+    assert _context_findings(rec, tpl) == []
+
+
+# ----------------------------------------------------------- stereo / macrocycle
+def test_stereocontrol_flags_achiral_and_substrate_controlled():
+    """Both levels fire: an achiral substrate cannot deliver the configuration, and a
+    chiral one leaves the diastereoselectivity merely asserted."""
+    achiral = [_step(1, 1, "C[C@H](O)CC", side=["CC(=O)CC"])]
+    findings = audit_route(_route(achiral), _tpls(achiral))
+    stereo = [f for f in findings if f.check == "stereocontrol"]
+    assert stereo and "cannot be delivered" in stereo[0].detail
+
+    chiral = [_step(1, 1, "C[C@H](O)[C@H](C)CC", side=["CC(=O)[C@H](C)CC"])]
+    findings = audit_route(_route(chiral), _tpls(chiral))
+    stereo = [f for f in findings if f.check == "stereocontrol"]
+    assert stereo and "substrate control is possible" in stereo[0].detail
+
+
+def test_intermolecular_macrocyclisation_flagged():
+    ring = "O=C1CCCCCCCCCNC1"          # 12-membered lactam
+    steps = [_step(1, 1, ring, side=["NCCCCCCCCCC(=O)O", "CCCCCCCCCC(=O)O"])]
+    findings = audit_route(_route(steps), _tpls(steps))
+    assert [f for f in findings if f.check == "macrocyclisation"]
+
+
+def test_oxidation_chemoselectivity_flagged():
+    """Oxidising an alcohol while a thiol survives."""
+    steps = [_step(1, 1, "O=CCCS", side=["OCCCS"])]
+    findings = audit_route(_route(steps), _tpls(steps))
+    assert [f for f in findings if f.check == "oxidation_chemoselectivity"]
+
+
+def test_organometallic_protic_quench_flagged():
+    steps = [_step(1, 1, "OC(C)c1ccccc1", side=["C[Mg]Br", "O=Cc1ccccc1", "OCCO"])]
+    findings = audit_route(_route(steps), _tpls(steps))
+    assert [f for f in findings if f.check == "organometallic_conditions"]
+
+
 # ------------------------------------------------- audit is decoupled from the pipeline
 def test_pipeline_does_not_apply_feasibility():
     """The generator must stay neutral: no feasibility rule may gate or annotate a
@@ -190,9 +279,9 @@ def test_every_enforced_motif_has_a_live_check():
     """Each motif claiming a check must name one the audit can actually emit."""
     steps = [_step(1, 1, "CCO")]
     audit_route(_route(steps), _tpls(steps))          # smoke: import graph is sound
-    known = {"snar_activation", "pg_bracket", "metal_catalysis_donor",
-             "redox_chemoselectivity", "stereocontrol", "fragment_balance",
-             "template_self_consistency"}
+    import re as _re
+    from route_rearrangement import feasibility as _f
+    known = set(_re.findall(r'check="([a-z_]+)"', open(_f.__file__).read()))
     for m in ENFORCED:
         assert m.check in known, f"{m.name} names unknown check {m.check}"
     assert BY_NAME["nitro_snar_reduction"].check == "snar_activation"

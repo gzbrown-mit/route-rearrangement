@@ -178,6 +178,41 @@ MOTIFS: List[Motif] = [
         mined_by="enolate alkylation step with an ester elsewhere in the substrate",
     ),
 
+    # ------------------------------------------------------- selectivity / context
+    Motif(
+        name="site_selectivity_unresolved",
+        family="selectivity",
+        rule="a step whose template can attack several distinct sites must have that "
+             "selectivity established, not inherited",
+        why="the materializer breaks such ties by picking the outcome most similar to "
+            "the literature precursor, which reproduces the published connectivity and "
+            "hides the ambiguity; a rearrangement that *exposes* a new site is exactly "
+            "the case that needs flagging",
+        check="site_selectivity",
+        mined_by="step whose retro template yields >1 distinct precursor set",
+    ),
+    Motif(
+        name="reaction_context_preserved",
+        family="selectivity",
+        rule="the environment within ~2 bonds of the reaction centre should be the "
+             "same as in the literature step",
+        why="a retro template is a substructure pattern and is blind beyond its "
+            "extraction radius, yet that is where activation lives; if the near "
+            "environment changed, the template still matches but the chemistry it "
+            "relies on may be gone (the general form of the nitro/SNAr trap)",
+        check="context_divergence",
+        mined_by="any step (compares rearranged vs literature substrate)",
+    ),
+    Motif(
+        name="oxidation_chemoselectivity",
+        family="chemoselectivity",
+        rule="an oxidation must not run while a more readily oxidised group is present "
+             "and expected to survive",
+        why="thiols, amines and alkenes oxidise under conditions used for alcohols",
+        check="oxidation_chemoselectivity",
+        mined_by="alcohol -> carbonyl step with another oxidisable group present",
+    ),
+
     # ------------------------------------------------------------------ stereochem
     Motif(
         name="stereocontrol_support",
@@ -198,7 +233,7 @@ MOTIFS: List[Motif] = [
         rule="macrocyclisation must be intramolecular and late (high dilution)",
         why="a rearrangement that makes the ring-closing partners separate molecules "
             "turns it into an oligomerisation",
-        check=None,
+        check="macrocyclisation",
         mined_by="ring of >=8 atoms formed in one step",
     ),
     Motif(

@@ -31,6 +31,7 @@ unactivated Ar-Br + amine is likely Buchwald-Hartwig, not a failed SNAr, so it i
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -78,6 +79,8 @@ _SMARTS = {
     "carboxylic_acid": "[CX3](=O)[OX2H1]",
     "thiol": "[SX2H]",
     "alcohol": "[OX2H][CX4]",
+    "grignard": "[Mg;$([Mg][#6])]",
+    "organolithium": "[Li;$([Li][#6])]",
     # electron-withdrawing substituents that activate a ring toward SNAr
     "ewg_nitro": "[N+](=O)[O-]",
     "ewg_cyano": "C#N",
@@ -376,19 +379,312 @@ def _stereocentres(smi: str) -> int:
 
 
 def _stereo_findings(rec: StepRecord, reactants: Sequence[str]) -> List[Finding]:
+    """A step that creates stereochemistry the template does not encode.
+
+    Two levels.  If the substrate already carries a stereocentre, substrate control is
+    at least *available* and the configuration is merely unverified.  If it does not,
+    nothing on the molecule can bias either face: the configuration in the record was
+    copied from the literature product, and no achiral reagent could deliver it.
+    """
     gained = _stereocentres(rec.new_product) - sum(_stereocentres(r) for r in reactants)
     if gained <= 0:
         return []
     if "@" in (rec.retro_smarts or ""):
         return []                       # template itself carries the stereochemistry
     if any(_stereocentres(r) for r in reactants):
-        return []                       # substrate control is at least available
+        return [Finding(
+            check="stereocontrol", motif="stereocontrol_support", severity="risk",
+            position=rec.position, step_id=rec.orig_step_id,
+            detail=(f"sets {gained} stereocentre(s) with a stereochemistry-free "
+                    f"template; the substrate does carry a stereocentre, so substrate "
+                    f"control is possible but the diastereoselectivity is asserted "
+                    f"from the literature product, not established here"))]
     return [Finding(
         check="stereocontrol", motif="stereocontrol_support", severity="risk",
         position=rec.position, step_id=rec.orig_step_id,
         detail=f"sets {gained} stereocentre(s) from an achiral substrate with a "
-               f"stereochemistry-free template: the configuration is inherited from "
-               f"the literature product, not established by this step")]
+               f"stereochemistry-free template: no stereo-directing element is present "
+               f"at this point, so the configuration cannot be delivered as written")]
+
+
+# ---------------------------------------------------------------------------
+# Organometallic addition / oxidation  (motifs: organometallic_needs_aprotic,
+# oxidation_chemoselectivity)
+# ---------------------------------------------------------------------------
+_PROTIC = (("carboxylic_acid", "carboxylic acid"), ("alcohol", "alcohol"),
+           ("free_nh_amine", "free N-H amine"), ("thiol", "thiol"))
+_ELECTROPHILES = ("ester", "nitrile", "ketone", "aldehyde")
+_OXIDISABLE = (("thiol", "thiol"), ("alcohol", "alcohol"),
+               ("free_nh_amine", "amine"), ("alkene", "alkene"))
+
+
+def _organometallic_findings(rec: StepRecord, reactants: Sequence[str]) -> List[Finding]:
+    joined = ".".join(reactants)
+    if not (_has(joined, "grignard") or _has(joined, "organolithium")):
+        return []
+    out: List[Finding] = []
+    protic = [label for key, label in _PROTIC if _has(joined, key)]
+    if protic:
+        out.append(Finding(
+            check="organometallic_conditions", motif="organometallic_needs_aprotic",
+            severity="risk", position=rec.position, step_id=rec.orig_step_id,
+            detail=f"organometallic addition with {', '.join(protic)} exposed: the "
+                   f"reagent is quenched before it can add"))
+    competing = [k for k in _ELECTROPHILES if _count(rec.new_product, k) > 0]
+    if len(competing) > 1:
+        out.append(Finding(
+            check="organometallic_conditions", motif="organometallic_needs_aprotic",
+            severity="risk", position=rec.position, step_id=rec.orig_step_id,
+            detail=f"more than one electrophilic carbon present ({', '.join(competing)}): "
+                   f"the reagent adds to the most electrophilic one, not necessarily "
+                   f"the intended site"))
+    return out
+
+
+def _oxidation_findings(rec: StepRecord, reactants: Sequence[str]) -> List[Finding]:
+    """An oxidation that leaves another readily-oxidised group untouched."""
+    substrate = max(reactants, key=_heavy) if reactants else ""
+    if not substrate:
+        return []
+    # alcohol -> carbonyl is the common case; require it to actually happen
+    if not (_count(substrate, "alcohol") > _count(rec.new_product, "alcohol")
+            and (_count(rec.new_product, "ketone") + _count(rec.new_product, "aldehyde")
+                 + _count(rec.new_product, "carboxylic_acid"))
+            > (_count(substrate, "ketone") + _count(substrate, "aldehyde")
+               + _count(substrate, "carboxylic_acid"))):
+        return []
+    survivors = [label for key, label in _OXIDISABLE
+                 if key != "alcohol" and _count(rec.new_product, key) > 0]
+    if not survivors:
+        return []
+    return [Finding(
+        check="oxidation_chemoselectivity", motif="oxidation_chemoselectivity",
+        severity="risk", position=rec.position, step_id=rec.orig_step_id,
+        detail=f"oxidises an alcohol while {', '.join(sorted(survivors))} survives — "
+               f"these are oxidised under comparable conditions")]
+
+
+# ---------------------------------------------------------------------------
+# Site / regioselectivity  (motif: site_selectivity_unresolved)
+# ---------------------------------------------------------------------------
+def _distinct_outcomes(retro_smarts: str, product: str) -> List[str]:
+    """Chemically distinct precursor sets the template yields on *product*.
+
+    Canonical de-duplication does the symmetry work for free: two equivalent sites
+    (the 2- and 6-position of a symmetric ring) give the *same* precursor set and
+    collapse to one entry, so only genuinely different disconnections are counted.
+    """
+    from .templates import apply_retro, canonicalize_smiles
+
+    if not retro_smarts or not product:
+        return []
+    seen = []
+    for outcome in apply_retro(retro_smarts, product, max_outcomes=20):
+        frags = sorted(filter(None, (canonicalize_smiles(f) for f in outcome.split("."))))
+        key = ".".join(frags)
+        if key and key not in seen:
+            seen.append(key)
+    return seen
+
+
+def _site_findings(rec: StepRecord, tpl: Optional[StepTemplate]) -> List[Finding]:
+    """Flag a step whose template can attack more than one distinct site.
+
+    The materializer resolves such ties by picking the outcome most similar to the
+    literature precursor, which reproduces the published connectivity and thereby
+    *hides* the ambiguity.  Comparing against the literature substrate separates the
+    two cases that matter: an ambiguity the chemist also faced, versus a **new** site
+    this rearrangement exposed.
+    """
+    here = _distinct_outcomes(rec.retro_smarts, rec.new_product)
+    if len(here) <= 1:
+        return []
+    there = _distinct_outcomes(tpl.retro_smarts, tpl.orig_product) if tpl else []
+    if not there or len(here) <= len(there):
+        # the literature substrate was equally (or more) ambiguous, so the chemist
+        # faced the same choice and resolved it: nothing this rearrangement caused.
+        # Only a *newly exposed* site is a finding.
+        return []
+    return [Finding(
+        check="site_selectivity", motif="site_selectivity_unresolved",
+        severity="risk", position=rec.position, step_id=rec.orig_step_id,
+        detail=(f"the template attacks {len(here)} chemically distinct sites on this "
+                f"substrate, up from {len(there)} on the literature one: this "
+                f"rearrangement exposed a new site, and the outcome was chosen by "
+                f"similarity to the literature precursor rather than by selectivity"))]
+
+
+# ---------------------------------------------------------------------------
+# Reaction-centre context  (motif: reaction_context_preserved)
+# ---------------------------------------------------------------------------
+def _centre_environment(mol, centre: Sequence[int], radius: int) -> Optional[str]:
+    """Canonical SMILES of the environment within *radius* bonds of *centre*."""
+    if mol is None or not centre:
+        return None
+    atoms = set(centre)
+    for _ in range(radius):
+        for idx in list(atoms):
+            atoms.update(n.GetIdx() for n in mol.GetAtomWithIdx(idx).GetNeighbors())
+    try:
+        return Chem.MolFragmentToSmiles(mol, sorted(atoms), canonical=True)
+    except Exception:
+        return None
+
+
+_EDG_SMARTS = {
+    "amine": "[NX3;H2,H1,H0;!$(N[CX3]=[OX1]);!$(N[N+](=O)[O-]);!$(NS(=O)=O)]",
+    "hydroxy_or_ether": "[OX2;H1,H0;!$(O[CX3]=[OX1])]",
+    "alkyl": "[CX4]",
+}
+
+
+def _aryl_electronics(mol, centre: Sequence[int]) -> Optional[Counter]:
+    """Multiset of activating/deactivating substituent classes on the aromatic system
+    bearing the reaction centre, or ``None`` if the centre is not aromatic.
+
+    Only substituents on the reacting ring system are counted: those are the ones whose
+    resonance/induction reaches the site being attacked.  Changes anywhere else in the
+    molecule are irrelevant to whether *this* step still works.
+    """
+    aromatic = [i for i in centre if mol.GetAtomWithIdx(i).GetIsAromatic()]
+    if not aromatic:
+        return None
+    system = set()
+    for idx in aromatic:
+        system |= _aromatic_system(mol, idx)
+    if not system:
+        return None
+    out: Counter = Counter()
+    for idx in system:
+        atom = mol.GetAtomWithIdx(idx)
+        if atom.GetIsAromatic() and atom.GetSymbol() == "N":
+            out["ring N"] += 1
+        for nbr in atom.GetNeighbors():
+            if nbr.GetIdx() in system:
+                continue
+            j = nbr.GetIdx()
+            if nbr.GetSymbol() in ("F", "Cl", "Br", "I"):
+                out[nbr.GetSymbol()] += 1
+                continue
+            labelled = False
+            for key in _EWG_KEYS:
+                p = _patt(key)
+                if p is not None and any(j in m for m in
+                                         mol.GetSubstructMatches(p, uniquify=True)):
+                    out[key.replace("ewg_", "")] += 1
+                    labelled = True
+                    break
+            if labelled:
+                continue
+            for name, sma in _EDG_SMARTS.items():
+                p = Chem.MolFromSmarts(sma)
+                if p is not None and any(j in m for m in
+                                         mol.GetSubstructMatches(p, uniquify=True)):
+                    out[name] += 1
+                    break
+    return out
+
+
+_EDG_LABELS = set(_EDG_SMARTS)
+
+
+def _electronic_balance(env: Counter) -> int:
+    """Net withdrawing-minus-donating substituent count on a ring system."""
+    return sum(n for k, n in env.items() if k not in _EDG_LABELS) - \
+        sum(n for k, n in env.items() if k in _EDG_LABELS)
+
+
+def _context_findings(rec: StepRecord, tpl: Optional[StepTemplate],
+                      max_radius: int = 4) -> List[Finding]:
+    """Has the environment the reaction depends on survived the rearrangement?
+
+    A retro template is a substructure pattern: it matches on local connectivity and
+    is blind to whatever sits just beyond its extraction radius, even though that is
+    exactly where activation lives (the nitro group that makes an SNAr go).  Comparing
+    the reaction centre's environment at increasing radius on the literature substrate
+    and on the rearranged one shows *where* the two diverge.
+
+    The radius bound is chemical, not arbitrary: on a six-membered ring an *ortho*
+    substituent sits two bonds from the reacting carbon and a *para* substituent four,
+    so activation is only visible out to radius 4 — a tighter cutoff would miss the
+    para-nitro case this check exists to catch.  Beyond that, differences are remote
+    and expected in any rearrangement.
+
+    Both substrates must match the template exactly once; when either is ambiguous the
+    comparison is meaningless and :func:`_site_findings` is the check that applies.
+    On a literature ordering the two substrates are identical by construction, so this
+    can never fire there.
+    """
+    if tpl is None or not rec.retro_smarts or not tpl.orig_product:
+        return []
+    patt = Chem.MolFromSmarts(rec.retro_smarts.split(">>")[0])
+    if patt is None:
+        return []
+    new_mol, old_mol = _mol(rec.new_product), _mol(tpl.orig_product)
+    if new_mol is None or old_mol is None:
+        return []
+    new_hits = new_mol.GetSubstructMatches(patt, uniquify=True)
+    old_hits = old_mol.GetSubstructMatches(patt, uniquify=True)
+    if len(new_hits) != 1 or len(old_hits) != 1:
+        return []                       # ambiguous match: site_selectivity's business
+
+    # Compare the *electronic character* of the ring being attacked, not raw structure.
+    # Any rearrangement changes the molecule somewhere; what matters is whether the
+    # activating/deactivating substituents on the reacting ring changed, because that
+    # is what the template cannot see and what decides whether the step still goes.
+    new_env = _aryl_electronics(new_mol, new_hits[0])
+    old_env = _aryl_electronics(old_mol, old_hits[0])
+    if new_env is None or old_env is None or new_env == old_env:
+        return []
+    # Require the ring's *net* electronic balance to have moved, not merely the
+    # identity of its substituents: swapping one ether for another leaves the site as
+    # electron-rich as it was, whereas losing a nitro or gaining an amine does not.
+    if _electronic_balance(new_env) == _electronic_balance(old_env):
+        return []
+    gained = sorted((new_env - old_env).elements())
+    lost = sorted((old_env - new_env).elements())
+    direction = ("more electron-rich"
+                 if _electronic_balance(new_env) < _electronic_balance(old_env)
+                 else "more electron-poor")
+    changes = []
+    if lost:
+        changes.append("lost " + ", ".join(lost))
+    if gained:
+        changes.append("gained " + ", ".join(gained))
+    return [Finding(
+        check="context_divergence", motif="reaction_context_preserved",
+        severity="risk", position=rec.position, step_id=rec.orig_step_id,
+        detail=(f"the ring bearing the reaction centre is {direction} than in the "
+                f"literature step ({'; '.join(changes)}): the template still matches, "
+                f"but the electronic activation the step relies on has changed"))]
+
+
+# ---------------------------------------------------------------------------
+# Ring formation  (motif: macrocyclisation_late)
+# ---------------------------------------------------------------------------
+def _ring_sizes(smi: str) -> Counter:
+    m = _mol(smi)
+    if m is None:
+        return Counter()
+    return Counter(len(r) for r in m.GetRingInfo().AtomRings())
+
+
+def _macrocycle_findings(rec: StepRecord, reactants: Sequence[str]) -> List[Finding]:
+    formed = _ring_sizes(rec.new_product)
+    for smi in reactants:
+        formed -= _ring_sizes(smi)
+    big = sorted(s for s in formed.elements() if s >= 8)
+    if not big:
+        return []
+    n_partners = len([r for r in reactants if _heavy(r) >= 4])
+    if n_partners > 1:
+        return [Finding(
+            check="macrocyclisation", motif="macrocyclisation_late",
+            severity="risk", position=rec.position, step_id=rec.orig_step_id,
+            detail=(f"closes a {big[0]}-membered ring from {n_partners} separate "
+                    f"fragments: an intermolecular macrocyclisation competes with "
+                    f"oligomerisation and needs high dilution"))]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -443,9 +739,14 @@ def audit_route(route: MaterializedRoute, templates: Dict[int, StepTemplate], *,
             continue
         out.extend(_snar_findings(rec, reactants))
         out.extend(_coupling_findings(rec, reactants))
+        out.extend(_organometallic_findings(rec, reactants))
         out.extend(_redox_findings(rec, reactants))
+        out.extend(_oxidation_findings(rec, reactants))
         out.extend(_stereo_findings(rec, reactants))
+        out.extend(_macrocycle_findings(rec, reactants))
         out.extend(_balance_findings(rec))
+        out.extend(_site_findings(rec, tpl))
+        out.extend(_context_findings(rec, tpl))
     out.extend(_pg_findings(route, brackets))
     out.sort(key=lambda f: (f.severity != "infeasible", f.position))
     return out
