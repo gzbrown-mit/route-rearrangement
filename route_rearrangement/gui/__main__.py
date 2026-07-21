@@ -24,7 +24,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Browse enumerated rearrangements of a route")
     ap.add_argument("--routes", default="results/scored.jsonl",
                     help="scored.jsonl (preferred) or routes.jsonl")
-    ap.add_argument("--tree-id", required=True)
+    ap.add_argument("--tree-id", action="append", default=[],
+                    help="literature route to show (repeatable). Omit to load every route "
+                         "in the file and arrow between them from the top pane.")
+    ap.add_argument("--max-routes", type=int, default=200,
+                    help="cap on routes loaded when --tree-id is omitted")
     ap.add_argument("--sort", default="", help="sort key: a metric name, or 'distinct' "
                     "(default when computed) to show the most-different routes first")
     ap.add_argument("--dpi", type=int, default=130)
@@ -42,22 +46,26 @@ def main(argv=None) -> int:
 
     groups = load_groups(args.routes, feasibility=args.feasibility or None,
                          pin=[parse_ordering(o) for o in args.ordering])
-    if args.tree_id not in groups:
-        print(f"{args.tree_id} not found in {args.routes}. Available: {sorted(groups)}",
-              file=sys.stderr)
+    missing = [t for t in args.tree_id if t not in groups]
+    if missing:
+        print(f"not found in {args.routes}: {', '.join(missing)}\n"
+              f"available: {', '.join(sorted(groups)[:20])}...", file=sys.stderr)
         return 2
-    group = groups[args.tree_id]
+    wanted = args.tree_id or sorted(groups)[:args.max_routes]
+    selected = [groups[t] for t in wanted]
 
     if args.html:
         import os
-        work = os.path.join(os.path.dirname(args.html) or ".", f"_imgs_{args.tree_id}")
+        # the gallery is one page per route; with several selected, write the first
+        group = selected[0]
+        work = os.path.join(os.path.dirname(args.html) or ".", f"_imgs_{group.tree_id}")
         build_gallery(group, args.html, work_dir=work, sort_metric=args.sort or None,
                       top=args.top, dpi=args.dpi)
         print(f"wrote {args.html}")
         return 0
 
     from .viewer import launch
-    return launch(group, sort_metric=args.sort or None, dpi=args.dpi)
+    return launch(selected, sort_metric=args.sort or None, dpi=args.dpi)
 
 
 if __name__ == "__main__":
