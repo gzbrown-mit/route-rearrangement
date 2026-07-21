@@ -25,11 +25,12 @@ Soft flags (recorded, never filtered):
 from __future__ import annotations
 
 from collections import Counter
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from rdkit import Chem
 
 from . import deps  # noqa: F401
+from .feasibility import audit_route, summarize
 from .materialize import MaterializedRoute, StepRecord
 from .templates import StepTemplate, route_sm_budget
 from synthesis_extraction.dependency.propagate import disconnected_edges
@@ -185,8 +186,14 @@ def fg_risk_flags(route: MaterializedRoute, templates: Dict[int, StepTemplate],
 
 def evaluate(route: MaterializedRoute, templates: Dict[int, StepTemplate],
              matrix=None, with_fg: bool = True,
-             orig_parents: Optional[Dict[int, Optional[int]]] = None) -> Optional[dict]:
-    """Apply hard gates; return the flags dict for an accepted route, else ``None``."""
+             orig_parents: Optional[Dict[int, Optional[int]]] = None,
+             brackets: Sequence[Tuple[int, int]] = (),
+             strict: bool = False) -> Optional[dict]:
+    """Apply hard gates; return the flags dict for an accepted route, else ``None``.
+
+    *brackets* feed the Tier 1 protecting-group audit; *strict* additionally rejects
+    any route carrying a Tier 1 ``infeasible`` finding (SNAr on an unactivated ring,
+    a deprotection preceding its own protection)."""
     if not route.ok:
         return None
     if not sanitizes(route):
@@ -194,8 +201,13 @@ def evaluate(route: MaterializedRoute, templates: Dict[int, StepTemplate],
     ok, bad = passes_connectivity(route)
     if not ok:
         return None
+    findings = audit_route(route, templates, brackets=brackets)
+    feas = summarize(findings)
+    if strict and feas["n_infeasible"]:
+        return None
     flags: dict = {
         "inexact_side_match": [r.position for r in route.steps if not r.exact_side_match],
+        "feasibility": feas,
     }
     if orig_parents is not None:
         by_position = {rec.position: rec for rec in route.steps}

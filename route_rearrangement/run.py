@@ -23,6 +23,7 @@ from collections import Counter
 from pathlib import Path
 
 from . import deps  # noqa: F401
+from .feasibility import detect_brackets
 from .filters import dedup_key, evaluate
 from .materialize import materialize_ordering, replay_identity
 from .schema import failure_record, route_record, write_jsonl
@@ -38,7 +39,8 @@ from synthesis_extraction.dependency.schedule import lattice_for
 def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 500,
                   beam: int = 3, max_outcomes: int = 20, max_accepted: int = 200,
                   with_fg: bool = True, matrix=None, provenance=None, full_graph=None,
-                  migration: bool = True, constraints: str = "full"):
+                  migration: bool = True, constraints: str = "full",
+                  strict: bool = False):
     """Run the full pipeline on one route.  Returns ``(summary, records, failures)``.
 
     *full_graph* — a pre-built unified-map graph (from :func:`build_route_graph`); when given
@@ -72,6 +74,7 @@ def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 5
 
     templates = extract_step_templates(full)
     orig_parents = original_parents(full)
+    brackets = detect_brackets(full)
     soft = constraints != "material"
     summary["constraints"] = constraints
     dep = dependency_graph_from_full_graph(
@@ -99,7 +102,8 @@ def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 5
                 failures.append(failure_record(tree_id, route, ordering_index=ordering_index))
                 continue
             flags = evaluate(route, templates, matrix=matrix, with_fg=with_fg,
-                             orig_parents=orig_parents)
+                             orig_parents=orig_parents, brackets=brackets,
+                             strict=strict)
             if flags is None:
                 summary["prune_reasons"]["failed_hard_gate"] += 1
                 continue
@@ -166,6 +170,9 @@ def main(argv=None) -> int:
                     help="'material' enumerates on the hard atom-based edges only and "
                          "lets the soft chemistry (protection brackets, FG exposure) be "
                          "scored rather than gated — many more orderings per route")
+    ap.add_argument("--strict", action="store_true",
+                    help="reject routes with a Tier 1 'infeasible' finding "
+                         "(unactivated SNAr, inverted protecting-group bracket)")
     ap.add_argument("--out-dir", default="results")
     args = ap.parse_args(argv)
 
@@ -207,7 +214,8 @@ def main(argv=None) -> int:
                 tid, tg, engine=args.engine, cap=args.cap, beam=args.beam,
                 max_outcomes=args.max_outcomes, max_accepted=args.max_accepted,
                 with_fg=not args.no_fg, provenance=provenance,
-                migration=not args.no_migration, constraints=args.constraints)
+                migration=not args.no_migration, constraints=args.constraints,
+                strict=args.strict)
             for r in records:
                 write_jsonl(routes_fh, r)
             for f in failures:
