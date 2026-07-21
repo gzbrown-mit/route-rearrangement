@@ -109,6 +109,20 @@ def _ancestor_positions(route: MaterializedRoute) -> Dict[int, List[int]]:
 # ---------------------------------------------------------------------------
 # fg_risk soft flag
 # ---------------------------------------------------------------------------
+def _mapped(smiles: str):
+    """Parse *smiles* with every atom carrying a map number.
+
+    ``enumerate_fgs`` keys its matches by atom-map number and silently returns no
+    matches on a map-free molecule — and materialized intermediates are map-free by
+    construction, so they must be re-numbered here or the whole flag is inert."""
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    for i, atom in enumerate(mol.GetAtoms()):
+        atom.SetAtomMapNum(i + 1)
+    return mol
+
+
 def fg_risk_flags(route: MaterializedRoute, templates: Dict[int, StepTemplate],
                   matrix=None) -> Tuple[List[dict], List[dict]]:
     """``(risks, abstentions)`` for the route's new intermediates.
@@ -141,11 +155,10 @@ def fg_risk_flags(route: MaterializedRoute, templates: Dict[int, StepTemplate],
             profiles[rec.position] = None
 
     ancestors = _ancestor_positions(route)
-    by_position = {rec.position: rec for rec in route.steps}
     risks: List[dict] = []
     abstains: List[dict] = []
     for rec in route.steps:
-        mol = Chem.MolFromSmiles(rec.new_product) if rec.new_product else None
+        mol = _mapped(rec.new_product) if rec.new_product else None
         if mol is None:
             continue
         try:
