@@ -70,6 +70,18 @@ $PY -m route_rearrangement.run --corpus $CORPUS --candidates candidates.jsonl \
 # or one specific route
 $PY -m route_rearrangement.run --corpus $CORPUS --tree-id 262_38 --out-dir results/
 
+# 2b. CHECK the results against the chemical-ordering motifs (a separate, post-hoc pass —
+#     the pipeline above never consults these rules, so it stays a neutral generator)
+$PY -m route_rearrangement.audit --results results_n1/ --corpus $N1 --out feasibility.jsonl
+$PY -m route_rearrangement.audit --results results_n1/ --check snar_activation --show 5
+#    reports Tier 1 findings per check, plus a CONTROL column: the same checks run on each
+#    route's literature ordering. Those syntheses worked, so a finding there is a rule bug
+#    or a mis-materialized record (cross-referenced against sm_mismatch) — never a fact
+#    about the route. That column is how the rules are calibrated.
+
+# which motifs does my dataset even contain?
+$PY -m route_rearrangement.find_motifs --corpus $N1 --limit 400
+
 # 3. score every enumeration with the eight metrics + cross-enumeration statistics
 $PY -m route_rearrangement.score --corpus $CORPUS --routes results/routes.jsonl \
     --out-dir results/ [--plausibility]

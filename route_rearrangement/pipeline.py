@@ -54,9 +54,6 @@ def main(argv=None) -> int:
                          "fragment is fully assembled before its coupling")
     ap.add_argument("--linear-only", action="store_true",
                     help="restore the old behavior: skip convergent trees")
-    ap.add_argument("--strict", action="store_true",
-                    help="reject routes with a Tier 1 'infeasible' finding "
-                         "(unactivated SNAr, inverted protecting-group bracket)")
     ap.add_argument("--constraints", choices=["full", "material"], default="full",
                     help="'material' enumerates on the hard atom-based edges only and "
                          "lets the soft chemistry (protection brackets, FG exposure) be "
@@ -77,8 +74,7 @@ def main(argv=None) -> int:
     provenance = {"corpus": str(args.corpus), "engine": args.engine,
                   "rdchiral_default_template": True,
                   "migration": not args.no_migration,
-                  "constraints": args.constraints,
-                  "strict": args.strict}
+                  "constraints": args.constraints}
     counts: Counter = Counter()
 
     scored_fh = (out / "scored.jsonl").open("w")
@@ -128,8 +124,7 @@ def main(argv=None) -> int:
                     tid, tg, full_graph=full, engine=args.engine, cap=args.cap,
                     beam=args.beam, max_accepted=args.max_accepted,
                     with_fg=not args.no_fg, provenance=provenance,
-                    migration=not args.no_migration, constraints=args.constraints,
-                    strict=args.strict)
+                    migration=not args.no_migration, constraints=args.constraints)
             except Exception as exc:  # noqa: BLE001
                 counts["process_error"] += 1
                 print(f"  [{tid}] error: {exc}", file=sys.stderr)

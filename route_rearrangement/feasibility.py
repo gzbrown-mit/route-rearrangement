@@ -1,5 +1,11 @@
 """Tier 1 — deterministic chemical invariants on a materialized route.
 
+Applied **after the fact**, by :mod:`.audit`, over a finished run.  The rearrangement
+pipeline does not call anything here: it stays a neutral generator, and these rules are
+how you *review* what it produced.  A check can therefore be corrected and the whole
+corpus re-audited in seconds, and a bug costs a wrong report rather than a route that
+was quietly thrown away.
+
 Tier 0 (:mod:`.filters`) asks whether a route is *structurally* coherent: the retro
 template matched, molecules parse, the tree connects, atoms are conserved.  Those are
 graph and valence facts — a route can pass every one of them and still be chemistry
@@ -443,6 +449,20 @@ def audit_route(route: MaterializedRoute, templates: Dict[int, StepTemplate], *,
     out.extend(_pg_findings(route, brackets))
     out.sort(key=lambda f: (f.severity != "infeasible", f.position))
     return out
+
+
+def audit_record(record: dict, templates: Optional[Dict[int, StepTemplate]] = None,
+                 brackets: Sequence[Tuple[int, int]] = ()) -> List[Finding]:
+    """Audit one ``routes.jsonl``/``scored.jsonl`` record.
+
+    Most checks need only the record's own reactants and products.  *templates* and
+    *brackets* come from the original corpus route and enable the two checks that
+    cannot be answered from the record alone (template self-consistency and the
+    protecting-group bracket); omit them to audit results without corpus access.
+    """
+    from .schema import route_from_record
+
+    return audit_route(route_from_record(record), templates or {}, brackets=brackets)
 
 
 def summarize(findings: Sequence[Finding]) -> dict:

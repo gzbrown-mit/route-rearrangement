@@ -1,6 +1,13 @@
 """Catalogue of *ordering-dependent* chemical motifs — the patterns a rearrangement
 can break, and the ground truth for judging whether the engine is performing.
 
+This catalogue is a **review instrument, not a filter**.  Nothing here runs inside the
+rearrangement pipeline: the pipeline enumerates, materializes and scores without
+consulting these rules, and :mod:`.audit` applies them to a finished run afterwards.
+Keeping the two apart means the generator is never biased by a heuristic, the rules can
+be retuned and re-run over an existing corpus without regenerating a route, and a wrong
+rule produces a wrong report instead of a silently discarded result.
+
 Each motif is a rule a bench chemist applies without thinking: a pair (or triple) of
 steps whose **relative order is not free**, for a reason that is deterministic
 chemistry rather than taste.  They are the right validation set for route

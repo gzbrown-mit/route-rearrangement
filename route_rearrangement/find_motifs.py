@@ -1,13 +1,12 @@
-"""Mine a corpus for routes exhibiting each ordering-dependent motif, and report how
-the engine performs on them.
+"""Census: which routes of a corpus exhibit each ordering-dependent motif.
 
-The literature route always satisfies its own motifs, which makes them ground truth:
-for every mined instance we materialize the rearrangements and ask two questions —
+A route that contains an SNAr, a protecting-group bracket or a cross-coupling is a
+route whose step order is *not* free — it is a test case for the corresponding rule in
+:mod:`.motifs`.  This tool answers "what chemistry is in my dataset, and which of it
+does the audit have rules for", and selects tree ids worth inspecting.
 
-* **false positives** — does a Tier 1 check fire on the *literature* ordering?  It
-  should not; every hit is a bug in the check or an over-strict rule.
-* **catches** — do the *rearranged* orderings that violate the motif get flagged?
-  These are the orderings that are atom-valid but chemically dead.
+It does no auditing: to check a finished run against the motifs use
+:mod:`.audit`, which reads a pipeline output directory.
 
 Usage::
 
@@ -26,11 +25,8 @@ from typing import Dict, List
 from rdkit import Chem, RDLogger
 
 from . import deps  # noqa: F401
-from .feasibility import _mol, _patt, audit_route, detect_brackets
+from .feasibility import _mol, _patt, detect_brackets
 from .motifs import MOTIFS
-from .run import process_route
-from .schema import route_from_record
-from .templates import extract_step_templates
 from synthesis_extraction.load_trees import iter_trees
 from synthesis_extraction.dependency.route_graph import build_route_graph
 
@@ -133,20 +129,18 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--corpus", required=True)
     ap.add_argument("--limit", type=int, default=300)
-    ap.add_argument("--motif", default="", help="only report this motif")
-    ap.add_argument("--cap", type=int, default=40)
-    ap.add_argument("--max-accepted", type=int, default=12)
-    ap.add_argument("--max-routes", type=int, default=60,
-                    help="materialize at most N mined routes")
-    ap.add_argument("--out", default="", help="write per-route cases JSONL here")
+    ap.add_argument("--motif", default="", help="only count routes with this motif")
+    ap.add_argument("--out", default="", help="write matched tree ids JSONL here")
     args = ap.parse_args(argv)
 
     exhibits: Counter = Counter()
     examples: Dict[str, List[str]] = defaultdict(list)
-    mined = []
+    rows: List[dict] = []
+    scanned = 0
     for i, (tid, tg) in enumerate(iter_trees(args.corpus)):
         if i >= args.limit:
             break
+        scanned = i + 1
         try:
             full = build_route_graph(tg, tid)
         except Exception:
@@ -163,70 +157,27 @@ def main(argv=None) -> int:
             if len(examples[h]) < 5:
                 examples[h].append(tid)
         if hits:
-            mined.append((tid, tg, full, hits))
+            rows.append({"tree_id": tid, "n_steps": full["qc"]["n_steps"],
+                         "motifs": hits})
 
-    print(f"scanned {min(i+1, args.limit)} trees; motif instances found:\n")
+    print(f"scanned {scanned} trees; {len(rows)} carry at least one motif\n")
     print(f"{'motif':<32}{'routes':>8}   examples")
     for m in MOTIFS:
         if exhibits.get(m.name):
-            print(f"{m.name:<32}{exhibits[m.name]:>8}   {', '.join(examples[m.name][:4])}")
-    unmined = [m.name for m in MOTIFS if not exhibits.get(m.name)]
-    if unmined:
-        print(f"\nno instances mined (miner not implemented or absent from corpus): "
-              f"{', '.join(unmined)}")
-
-    # ---- behaviour on the mined routes
-    print(f"\nmaterializing up to {args.max_routes} mined routes...\n")
-    fp = Counter()          # check fired on the LITERATURE ordering
-    caught = Counter()      # check fired on a rearrangement
-    n_lit = n_rearr = 0
-    cases = []
-    for tid, tg, full, hits in mined[: args.max_routes]:
-        try:
-            summary, records, _f = process_route(
-                tid, tg, full_graph=full, cap=args.cap,
-                max_accepted=args.max_accepted, with_fg=False)
-        except Exception:
-            continue
-        if summary["status"] != "ok":
-            continue
-        templates = extract_step_templates(full)
-        brackets = detect_brackets(full)
-        for rec in records:
-            route = route_from_record(rec)
-            findings = audit_route(route, templates, brackets=brackets)
-            checks = {f.check for f in findings}
-            infeas = {f.check for f in findings if f.severity == "infeasible"}
-            if rec["is_original_order"]:
-                n_lit += 1
-                for c in checks:
-                    fp[c] += 1
-                for c in infeas:
-                    fp[f"{c}::INFEASIBLE"] += 1
-            else:
-                n_rearr += 1
-                for c in checks:
-                    caught[c] += 1
-                for c in infeas:
-                    caught[f"{c}::INFEASIBLE"] += 1
-        cases.append({"tree_id": tid, "motifs": hits,
-                      "n_records": len(records)})
-
-    print(f"literature orderings audited: {n_lit};  rearrangements audited: {n_rearr}\n")
-    print(f"{'check':<32}{'on literature':>15}{'on rearrangements':>20}")
-    allchecks = sorted(set(fp) | set(caught))
-    for c in allchecks:
-        lit = f"{fp[c]} ({fp[c]/max(n_lit,1):.0%})"
-        re_ = f"{caught[c]} ({caught[c]/max(n_rearr,1):.0%})"
-        print(f"{c:<32}{lit:>15}{re_:>20}")
-    print("\nNOTE: a check firing on the LITERATURE ordering is a false positive — the\n"
-          "published route worked. INFEASIBLE rows there must be zero.")
+            print(f"{m.name:<32}{exhibits[m.name]:>8}   "
+                  f"{', '.join(examples[m.name][:4])}")
+    absent = [m.name for m in MOTIFS if not exhibits.get(m.name)]
+    if absent:
+        print(f"\nno instances found (miner not implemented, or absent from corpus):\n"
+              f"  {', '.join(absent)}")
+    print("\nTo check a finished run against these motifs:\n"
+          "  python -m route_rearrangement.audit --results <out-dir> --corpus <corpus>")
 
     if args.out:
         with open(args.out, "w") as fh:
-            for c in cases:
-                fh.write(json.dumps(c) + "\n")
-        print(f"\nwrote {len(cases)} cases to {args.out}")
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+        print(f"\nwrote {len(rows)} routes to {args.out}")
     return 0
 
 

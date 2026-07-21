@@ -157,6 +157,34 @@ def test_fragment_balance_flagged():
     assert [f for f in findings if f.check == "fragment_balance"]
 
 
+# ------------------------------------------------- audit is decoupled from the pipeline
+def test_pipeline_does_not_apply_feasibility():
+    """The generator must stay neutral: no feasibility rule may gate or annotate a
+    route during materialization.  The audit is a separate pass over the results."""
+    import inspect
+
+    from route_rearrangement import filters, pipeline, run
+
+    for mod in (filters, run, pipeline):
+        src = inspect.getsource(mod)
+        assert "audit_route" not in src, f"{mod.__name__} calls the feasibility audit"
+        assert "summarize(" not in src, f"{mod.__name__} embeds feasibility findings"
+    assert "strict" not in inspect.signature(run.process_route).parameters
+
+
+def test_audit_record_round_trips_a_result_record():
+    """audit_record works straight off a routes.jsonl record, with no corpus."""
+    from route_rearrangement.feasibility import audit_record
+    from route_rearrangement.schema import route_record
+
+    steps = [_step(1, 1, "Nc1ccc(F)cc1", side=["O=[N+]([O-])c1ccc(F)cc1"]),
+             _step(2, 2, _ANILINE_ETHER, side=["Oc1ccccc1"], synth=["Nc1ccc(F)cc1"])]
+    rec = route_record("t1", _route(steps), ordering_index=0, variant=0,
+                       is_original_order=False, identity_roundtrip=True, flags={})
+    findings = audit_record(rec)
+    assert [f for f in findings if f.check == "snar_activation"]
+
+
 # ------------------------------------------------------------------- catalogue
 def test_every_enforced_motif_has_a_live_check():
     """Each motif claiming a check must name one the audit can actually emit."""
