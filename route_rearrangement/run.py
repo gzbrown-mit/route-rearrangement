@@ -38,7 +38,7 @@ from synthesis_extraction.dependency.schedule import lattice_for
 def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 500,
                   beam: int = 3, max_outcomes: int = 20, max_accepted: int = 200,
                   with_fg: bool = True, matrix=None, provenance=None, full_graph=None,
-                  migration: bool = True):
+                  migration: bool = True, constraints: str = "full"):
     """Run the full pipeline on one route.  Returns ``(summary, records, failures)``.
 
     *full_graph* — a pre-built unified-map graph (from :func:`build_route_graph`); when given
@@ -49,7 +49,14 @@ def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 5
     steps, so those steps run on the combined molecule (convergence-point migration).
     When ``False``, the original tree's child→parent pairs are added as constraints:
     branches may still interleave, but every fragment is fully assembled before its
-    coupling (topology-preserving mode — the validation harness)."""
+    coupling (topology-preserving mode — the validation harness).
+
+    *constraints* — ``"full"`` enumerates orderings that satisfy the material edges
+    **and** the soft chemistry edges (protection brackets, counterfactual FG-exposure).
+    ``"material"`` keeps only the hard atom-based edges — you cannot transform atoms a
+    later step has not installed yet — and lets the soft chemistry be *scored* instead
+    of *gated*: the freed orderings are still vetoed by the retro-template no-match and
+    priced by the ``exposure``/``competing`` metrics."""
     summary = {"tree_id": tree_id, "status": "ok", "n_steps": 0, "n_orders": 0,
                "orderings_tried": 0, "accepted": 0, "duplicates": 0,
                "identity_roundtrip": False, "is_linear": True,
@@ -65,7 +72,10 @@ def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 5
 
     templates = extract_step_templates(full)
     orig_parents = original_parents(full)
-    dep = dependency_graph_from_full_graph(full, tree_id)
+    soft = constraints != "material"
+    summary["constraints"] = constraints
+    dep = dependency_graph_from_full_graph(
+        full, tree_id, include_compatibility=soft, include_counterfactual=soft)
     incidental = dep.incidental_order()
 
     replay = replay_identity(full, templates, incidental, beam=beam)
@@ -152,6 +162,10 @@ def main(argv=None) -> int:
     ap.add_argument("--no-migration", action="store_true",
                     help="topology-preserving mode: branches interleave but every "
                          "fragment is fully assembled before its coupling")
+    ap.add_argument("--constraints", choices=["full", "material"], default="full",
+                    help="'material' enumerates on the hard atom-based edges only and "
+                         "lets the soft chemistry (protection brackets, FG exposure) be "
+                         "scored rather than gated — many more orderings per route")
     ap.add_argument("--out-dir", default="results")
     args = ap.parse_args(argv)
 
@@ -193,7 +207,7 @@ def main(argv=None) -> int:
                 tid, tg, engine=args.engine, cap=args.cap, beam=args.beam,
                 max_outcomes=args.max_outcomes, max_accepted=args.max_accepted,
                 with_fg=not args.no_fg, provenance=provenance,
-                migration=not args.no_migration)
+                migration=not args.no_migration, constraints=args.constraints)
             for r in records:
                 write_jsonl(routes_fh, r)
             for f in failures:
