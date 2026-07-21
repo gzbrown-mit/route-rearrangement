@@ -3,6 +3,10 @@
     python -m route_rearrangement.gui --routes results/scored.jsonl --tree-id 106_201
     python -m route_rearrangement.gui --routes results/scored.jsonl --tree-id 106_201 --sort exposure
 
+Use ``--ordering`` to jump straight to a specific rearrangement (repeatable; pinned ones
+are shown first however the rest are sorted), and ``--feasibility`` to join in an audit
+``feasibility.jsonl`` so each route's chemical findings are shown next to its metrics.
+
 Use ``--html`` to write a static HTML gallery instead of opening the PyQt window (works
 without a display).
 """
@@ -13,7 +17,7 @@ import argparse
 import sys
 
 from .gallery import build_gallery
-from .model import load_groups
+from .model import load_groups, parse_ordering
 
 
 def main(argv=None) -> int:
@@ -28,9 +32,16 @@ def main(argv=None) -> int:
                     "instead of opening the window")
     ap.add_argument("--top", type=int, default=25, help="HTML mode: max rearrangements shown "
                     "(e.g. --sort distinct --top 5 for the 5 most different)")
+    ap.add_argument("--feasibility", default="",
+                    help="audit feasibility.jsonl to join in; findings are displayed "
+                         "alongside the metrics and never used to filter")
+    ap.add_argument("--ordering", action="append", default=[],
+                    help="pin this exact ordering to the front, e.g. "
+                         "--ordering 6,3,5,2,4,1 (repeatable)")
     args = ap.parse_args(argv)
 
-    groups = load_groups(args.routes)
+    groups = load_groups(args.routes, feasibility=args.feasibility or None,
+                         pin=[parse_ordering(o) for o in args.ordering])
     if args.tree_id not in groups:
         print(f"{args.tree_id} not found in {args.routes}. Available: {sorted(groups)}",
               file=sys.stderr)

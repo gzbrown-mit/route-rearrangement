@@ -14,7 +14,7 @@ import os
 from typing import Optional
 
 from ..metrics import METRIC_NAMES
-from .model import RouteEntry, TreeGroup, load_groups
+from .model import RouteEntry, TreeGroup, load_groups, parse_ordering
 from .render import render_record_png
 
 
@@ -24,16 +24,56 @@ def _img_data_uri(png_path: str) -> str:
 
 
 def _metric_cells(group: TreeGroup, entry: RouteEntry) -> str:
+    """One cell per metric: the score, its delta against the literature route (higher is
+    better throughout, so a positive delta is an improvement), and its percentile among
+    this tree's rearrangements."""
     cells = []
     for m in METRIC_NAMES:
         v = entry.score(m)
         if v is None:
             cells.append('<td class="na">–</td>')
             continue
+        base = group.original.score(m) if group.original is not None else None
+        delta = ""
+        if base is not None and not entry.is_original:
+            d = v - base
+            cls = "up" if d > 0 else ("down" if d < 0 else "flat")
+            delta = f'<br><small class="{cls}">{d:+.2f} vs lit</small>'
         pct = group.percentile(entry, m)
         pct_s = f"<br><small>pctile {pct:.0%}</small>" if pct is not None else ""
-        cells.append(f"<td>{v:.3f}{pct_s}</td>")
+        cells.append(f"<td>{v:.3f}{delta}{pct_s}</td>")
     return "".join(cells)
+
+
+def _findings_block(group: TreeGroup, entry: RouteEntry) -> str:
+    """Post-hoc audit findings, split into those the literature ordering also carries
+    (inherent to the chemistry — the chemist accepted them) and those this rearrangement
+    introduced (the only ones chargeable to it)."""
+    if not entry.has_audit():
+        return ""
+    findings = entry.findings()
+    if not findings:
+        return '<p class="clean">✓ feasibility audit: no findings</p>'
+    new = set(group.new_checks(entry))
+    rows = []
+    for f in sorted(findings, key=lambda f: (f.get("severity") != "infeasible",
+                                             f["check"], f.get("position", 0))):
+        sev = f.get("severity", "risk")
+        origin = ("new" if f["check"] in new and not entry.is_original else "inherited")
+        rows.append(
+            f'<tr class="{html.escape(sev)}"><td>{html.escape(f["check"])}</td>'
+            f'<td>{html.escape(sev)}</td>'
+            f'<td class="origin {origin}">{origin}</td>'
+            f'<td>{f.get("position", "–")}</td>'
+            f'<td class="detail">{html.escape(str(f.get("detail", "")))}</td></tr>')
+    n_new = sum(1 for f in findings if f["check"] in new) if not entry.is_original else 0
+    head = (f'{len(findings)} finding(s) · {entry.n_infeasible()} infeasible · '
+            f'{entry.n_risk()} risk'
+            + (f' · <b>{n_new} new vs this route&rsquo;s literature ordering</b>'
+               if not entry.is_original else ''))
+    return (f'<details class="audit"><summary>{head}</summary>'
+            f'<table class="findings"><tr><th>check</th><th>severity</th><th>origin</th>'
+            f'<th>step</th><th>detail</th></tr>{"".join(rows)}</table></details>')
 
 
 def _route_block(group: TreeGroup, entry: RouteEntry, work_dir: str,
@@ -60,12 +100,14 @@ def _route_block(group: TreeGroup, entry: RouteEntry, work_dir: str,
     if dist is not None and not entry.is_original:
         badge = f'<span class="diverse">most-different #{dr}</span> ' if dr else ""
         dist_note = f' · {badge}<span class="dist">distance from literature: {dist:.2f}</span>'
+    pin = '<span class="pin">pinned</span> ' if entry.pinned else ""
     return f"""
-    <section class="route {'original' if entry.is_original else ''}">
-      <h3>{html.escape(title)} {download}</h3>
+    <section class="route {'original' if entry.is_original else ''}{' pinned' if entry.pinned else ''}">
+      <h3>{pin}{html.escape(title)} {download}</h3>
       <p class="ordering">ordering (first→last): {html.escape(ordering)}{flag_note}{dist_note}</p>
       <table class="metrics"><tr>{''.join(f'<th>{m}</th>' for m in METRIC_NAMES)}</tr>
       <tr>{_metric_cells(group, entry)}</tr></table>
+      {_findings_block(group, entry)}
       <div class="scheme">{img}</div>
     </section>"""
 
@@ -75,6 +117,8 @@ def build_gallery(group: TreeGroup, out_html: str, *, work_dir: str,
     os.makedirs(work_dir, exist_ok=True)
     keys = group.sort_keys()                       # "distinct" first when computed
     sort_metric = sort_metric or (keys[0] if keys else None)
+    # a pinned route was explicitly asked for; never let --top cut it off
+    top = max(top, sum(1 for e in group.rearrangements if e.pinned))
 
     from .model import DISTINCT_KEY
     if sort_metric == DISTINCT_KEY:
@@ -121,6 +165,21 @@ _HEAD = """<!doctype html><html><head><meta charset="utf-8">
    margin-left: 10px; }}
  a.dl:hover {{ text-decoration: underline; }}
  small {{ color: #888; }}
+ small.up {{ color: #2f855a; font-weight: 600; }} small.down {{ color: #c53030; }}
+ section.pinned {{ border-color: #805ad5; box-shadow: 0 0 0 2px #e9d8fd; }}
+ .pin {{ background: #805ad5; color: #fff; border-radius: 4px; padding: 1px 6px;
+   font-size: 11px; vertical-align: middle; }}
+ details.audit {{ margin: 8px 0; font-size: 12px; }}
+ details.audit summary {{ cursor: pointer; color: #b7791f; }}
+ p.clean {{ color: #2f855a; font-size: 12px; margin: 8px 0; }}
+ table.findings {{ border-collapse: collapse; margin: 8px 0; }}
+ table.findings th, table.findings td {{ border: 1px solid #e2e8f0; padding: 3px 8px;
+   font-size: 12px; text-align: left; }}
+ table.findings th {{ background: #f7fafc; }}
+ tr.infeasible td {{ background: #fff5f5; }}
+ td.origin.new {{ color: #c53030; font-weight: 600; }}
+ td.origin.inherited {{ color: #888; }}
+ td.detail {{ max-width: 520px; color: #444; }}
 </style></head><body>
 <h1>Route rearrangements for {tree_id}</h1>
 <p>{n} valid rearrangements enumerated. Sorted by <b>{sort}</b>. Higher metric score = better;
@@ -136,9 +195,16 @@ def main(argv=None) -> int:
     ap.add_argument("--sort", default="", help="metric to sort by (default: first available)")
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--dpi", type=int, default=130)
+    ap.add_argument("--feasibility", default="",
+                    help="audit feasibility.jsonl to join in (findings are displayed, "
+                         "never used to filter)")
+    ap.add_argument("--ordering", action="append", default=[],
+                    help="show this exact ordering first, e.g. --ordering 6,3,5,2,4,1 "
+                         "(repeatable)")
     args = ap.parse_args(argv)
 
-    groups = load_groups(args.routes)
+    groups = load_groups(args.routes, feasibility=args.feasibility or None,
+                         pin=[parse_ordering(o) for o in args.ordering])
     if args.tree_id not in groups:
         ap.error(f"{args.tree_id} not in {args.routes}; have {sorted(groups)[:10]}...")
     group = groups[args.tree_id]

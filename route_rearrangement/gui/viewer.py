@@ -119,6 +119,23 @@ class RouteViewer(QMainWindow):
         except Exception:
             return None
 
+    def _audit_line(self, entry: RouteEntry) -> str:
+        """Post-hoc findings, if a feasibility.jsonl was joined in.  A check the route's own
+        literature ordering also trips is inherent chemistry, not rearrangement damage, so
+        the two are counted separately."""
+        if not entry.has_audit():
+            return ""
+        findings = entry.findings()
+        if not findings:
+            return "<br><span style='color:#2f855a'>✓ feasibility audit: no findings</span>"
+        new = set(self.group.new_checks(entry)) if not entry.is_original else set()
+        detail = ", ".join(
+            f"{c}{'*' if c in new else ''}" for c in sorted(entry.checks()))
+        counts = f"{entry.n_infeasible()} infeasible / {entry.n_risk()} risk"
+        star = f" &nbsp; <b>{len(new)} new vs literature (*)</b>" if new else ""
+        return (f"<br><span style='color:#b7791f'>audit: {counts} &nbsp; {detail}"
+                f"</span>{star}")
+
     def _caption(self, entry: RouteEntry, extra: str = "") -> str:
         ordering = " → ".join(str(s) for s in entry.ordering)
         cells = []
@@ -126,9 +143,15 @@ class RouteViewer(QMainWindow):
             v = entry.score(m)
             if v is None:
                 continue
+            base = self.group.original.score(m) if self.group.original is not None else None
+            delta = ""
+            if base is not None and not entry.is_original:
+                d = v - base
+                colour = "#2f855a" if d > 0 else ("#c53030" if d < 0 else "#888")
+                delta = f" <span style='color:{colour}'>({d:+.2f})</span>"
             pct = self.group.percentile(entry, m)
             pct_s = f" [{pct:.0%}]" if pct is not None else ""
-            cells.append(f"{m}={v:.3f}{pct_s}")
+            cells.append(f"{m}={v:.3f}{delta}{pct_s}")
         metric_line = " &nbsp; ".join(cells) if cells else "no metrics computed"
         dist = entry.distance_to_original()
         dist_line = ""
@@ -137,8 +160,10 @@ class RouteViewer(QMainWindow):
             badge = (f"<b style='color:#2b6cb0'>most-different #{dr}</b> &nbsp; " if dr else "")
             dist_line = (f"<br><span style='color:#2b6cb0'>{badge}"
                          f"distance from literature route: {dist:.2f}</span>")
-        return (f"<span style='font-family:monospace'>order: {ordering}</span>{extra}<br>"
-                f"<span style='color:#444'>{metric_line}</span>{dist_line}")
+        pin = ("<b style='color:#805ad5'>[pinned]</b> " if entry.pinned else "")
+        return (f"{pin}<span style='font-family:monospace'>order: {ordering}</span>{extra}<br>"
+                f"<span style='color:#444'>{metric_line}</span>{dist_line}"
+                f"{self._audit_line(entry)}")
 
     def _set_image(self, label: QLabel, entry: RouteEntry) -> None:
         self._entry_by_key = getattr(self, "_entry_by_key", {})
