@@ -263,6 +263,9 @@ def analyze_rung(table: dict, *, min_n: int = 30, min_routes: int = 5) -> dict:
                        min_n=min_n, min_routes=min_routes),
         "depth_null": asdict(null) if null is not None else None,
         "keys": keys,
+        # carried through unchanged: resolve_pairs joins rungs on this lineage, not on keys
+        "parent_key": table.get("parent_key"),
+        "env_samples": table.get("env_samples"),
         "pairs": tested,
     }
 
@@ -289,24 +292,45 @@ def significant(rows: Sequence[dict], *, q: float = 0.05, use_cluster: bool = Tr
 # ---------------------------------------------------------------------------
 def resolve_pairs(per_rung: Dict[str, dict], *, min_n: int = 30,
                   min_routes: int = 5) -> List[dict]:
-    """For every (key_a, key_b) seen at any rung, the finest rung that can support it.
+    """For every pair of transformations, the finest rung that can actually support a verdict.
 
-    Pairs are matched across rungs by their *key strings*, which differ per rung, so the join
-    is done on the coarsest rung's key pair: two fine-rung pairs that collapse to the same
-    coarse pair are the same chemistry viewed at different resolution.  We therefore report
-    resolution per *coarse* pair and record the finer rungs' verdicts alongside it — that is
-    what makes cross-rung disagreement visible.
+    Rungs name the same chemistry with different key strings, so the cross-rung join cannot be
+    done on the key — it is done on the **lineage** each rung's table carries: every key
+    records its own key at the coarsest rung, so a fine pair and a coarse pair are the same
+    chemistry when both their keys share a parent.  (Joining on key strings instead silently
+    matches nothing above the coarsest rung, which makes every pair appear to resolve there.)
+
+    Many fine pairs collapse into one coarse pair.  For a given coarse pair we take, at each
+    rung, the **best-supported** fine pair beneath it: the ladder exists to make the most
+    specific defensible statement, and that is the most specific one with evidence behind it.
     """
     coarse = ladder.RUNGS[-1].name
     if coarse not in per_rung:
         return []
+
+    # {rung: {(parent_a, parent_b): best-supported row}}
     by_rung_lookup: Dict[str, Dict[Tuple[str, str], dict]] = {}
     for name, res in per_rung.items():
         keys = res["keys"]
-        by_rung_lookup[name] = {(keys[r["a"]], keys[r["b"]]): r for r in res["pairs"]}
+        parents = res.get("parent_key") or [None] * len(keys)
+        best: Dict[Tuple[str, str], dict] = {}
+        for r in res["pairs"]:
+            pa = parents[r["a"]] if r["a"] < len(parents) else None
+            pb = parents[r["b"]] if r["b"] < len(parents) else None
+            if not pa or not pb:
+                continue
+            # the pair's canonical direction is set by its own key order; re-canonicalize on
+            # the parents and flip the proportion when the parent order disagrees
+            flip = (keys[r["a"]] <= keys[r["b"]]) != (pa <= pb)
+            key = (pa, pb) if pa <= pb else (pb, pa)
+            row = dict(r, p_first=(1.0 - r["p_first"]) if flip else r["p_first"])
+            prev = best.get(key)
+            if prev is None or row["n_obs"] > prev["n_obs"]:
+                best[key] = row
+        by_rung_lookup[name] = best
 
     out = []
-    for pair_keys, row in by_rung_lookup[coarse].items():
+    for pair_keys in by_rung_lookup[coarse]:
         support = {}
         routes = {}
         verdicts = {}

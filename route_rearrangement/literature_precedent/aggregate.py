@@ -77,6 +77,11 @@ class RungTable:
         # the template string against itself, and the collision audit needs them too.
         self.env_samples: Dict[int, List[str]] = defaultdict(list)
         self.max_env_samples = 4
+        # This key's key at the *coarsest* rung.  Rungs use different key strings for the same
+        # chemistry, so cross-rung backoff cannot join on the key itself; it joins on this
+        # lineage instead.  Recorded here because only the aggregation pass sees a center's
+        # keys at every rung at once.
+        self.parent: Dict[int, str] = {}
         self.n_routes = 0
         self.n_routes_with_keys = 0
         self.n_centers = 0
@@ -99,7 +104,8 @@ class RungTable:
 
     # -- accumulation --------------------------------------------------------
     def observe_route(self, keyed: Sequence[Tuple[ContextualCenter, str]],
-                      forced_index: Optional[Dict[int, set]] = None) -> None:
+                      forced_index: Optional[Dict[int, set]] = None,
+                      parents: Optional[Sequence[Optional[str]]] = None) -> None:
         """Fold one route's observations in, clustering by this route.
 
         *keyed* is the route's centers paired with their key at this rung (already filtered to
@@ -115,10 +121,12 @@ class RungTable:
         ids = [self.intern(k) for _, k in keyed]
         for kid in set(ids):
             self.density[kid] += 1
-        for (c, _), kid in zip(keyed, ids):
+        for i, ((c, _), kid) in enumerate(zip(keyed, ids)):
             bucket = self.env_samples[kid]
             if c.synthon_env and len(bucket) < self.max_env_samples and c.synthon_env not in bucket:
                 bucket.append(c.synthon_env)
+            if parents is not None and kid not in self.parent and parents[i]:
+                self.parent[kid] = parents[i]
 
         # normalized formation depth (rank-based)
         steps = sorted({c.formation_step for c, _ in keyed})
@@ -215,6 +223,8 @@ class RungTable:
             ],
             "env_samples": [self.env_samples.get(kid, []) for kid, _ in
                             sorted(used.items(), key=lambda t: t[1])],
+            "parent_key": [self.parent.get(kid) for kid, _ in
+                           sorted(used.items(), key=lambda t: t[1])],
             "pair_columns": ["a", "b", "n_first_second", "n_second_first", "n_same_step",
                              "n_material_forced", "n_routes", "sum_a", "sum_n",
                              "sum_a2", "sum_an", "sum_n2"],
@@ -250,12 +260,15 @@ def aggregate(route_centers: Iterable[Tuple[str, List[ContextualCenter]]],
         fidx = forced.get(route_id)
         # one key computation per center per rung, reused across the pair loop
         keys_per_center = [ladder.keys_for_center(c, rungs) for c in centers]
+        coarsest = rungs[-1].name
         for r in rungs:
             t = tables[r.name]
             t.n_centers += len(centers)
-            keyed = [(c, ks[r.name]) for c, ks in zip(centers, keys_per_center) if ks[r.name]]
+            pairs_ = [(c, ks[r.name], ks[coarsest])
+                      for c, ks in zip(centers, keys_per_center) if ks[r.name]]
+            keyed = [(c, k) for c, k, _ in pairs_]
             t.n_centers_keyed += len(keyed)
-            t.observe_route(keyed, forced_index=fidx)
+            t.observe_route(keyed, forced_index=fidx, parents=[p for _, _, p in pairs_])
         if progress_every and n % progress_every == 0:
             log.warning("%d routes; pairs at %s: %d", n, rungs[0].name,
                         len(tables[rungs[0].name].pairs))

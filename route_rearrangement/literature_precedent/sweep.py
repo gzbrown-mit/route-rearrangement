@@ -94,8 +94,9 @@ def collision_profile(route_centers: Iterable[Tuple[str, List[ContextualCenter]]
             "envs_per_key_median": statistics.median(widths) if widths else None,
             "envs_per_key_p90": _quantile(widths, 0.9),
             "envs_per_key_max": max(widths) if widths else None,
-            # 1.0 = every occurrence of the busiest keys is a distinct reacting environment
-            # (no pooling at all); near 0 = one key covers many repeats of the same chemistry
+            # distinct environments per occurrence: 1.0 means every use of the key brings a
+            # different reacting substructure (the key pools unrelated chemistry); near 0
+            # means the key keeps naming the same transformation (specific, as intended)
             "env_diversity_ratio": (sum(widths) / sum(occ)) if sum(occ) else None,
         }
     return out
@@ -140,17 +141,20 @@ def profile_table(t: RungTable, *, min_n: int = 30, min_routes: int = 5) -> dict
     }
 
 
-def sweep(route_centers: Iterable[Tuple[str, List[ContextualCenter]]],
-          rungs: Sequence[Rung] = RUNGS,
+def sweep(source, rungs: Sequence[Rung] = RUNGS,
           forced: Optional[Dict[str, Dict[int, set]]] = None,
           *, min_n: int = 30, min_routes: int = 5, limit: int = 0,
           collisions: bool = True, collision_limit: int = 20000) -> dict:
-    """Profile every rung over one centers cache."""
-    items = list(route_centers) if collisions else route_centers
-    tables = aggregate.aggregate(iter(items) if collisions else items,
-                                 rungs=rungs, forced=forced, limit=limit)
+    """Profile every rung over one centers cache.
+
+    *source* is a **callable returning a fresh iterator** of ``(route_id, centers)``, not an
+    iterator: the collision audit needs a second pass, and materializing 457k routes' centers
+    to replay them costs several GB.
+    """
+    make = source if callable(source) else (lambda _s=list(source): iter(_s))
+    tables = aggregate.aggregate(make(), rungs=rungs, forced=forced, limit=limit)
     profiles = [profile_table(tables[r.name], min_n=min_n, min_routes=min_routes) for r in rungs]
-    coll = collision_profile(iter(items), rungs, limit=collision_limit) if collisions else {}
+    coll = collision_profile(make(), rungs, limit=collision_limit) if collisions else {}
     for p in profiles:
         p.update(coll.get(p["rung"], {}))
     return {"min_n": min_n, "min_routes": min_routes, "rungs": profiles}
@@ -165,7 +169,7 @@ _COLS = [
     ("cover", "coverage_centers", "{:.3f}", 7),
     ("pairs", "n_pairs", "{:,}", 9),
     ("med n", "support_median", "{:.0f}", 7),
-    ("1-only", "frac_pairs_seen_once", "{:.2f}", 7),
+    ("<=1 obs", "frac_pairs_seen_once", "{:.2f}", 8),
     ("testable", "n_pairs_testable", "{:,}", 9),
     ("obs/route", "obs_per_route_testable", "{:.2f}", 10),
     ("envs/key", "envs_per_key_median", "{:.0f}", 9),
@@ -186,8 +190,14 @@ def format_table(result: dict) -> str:
     lines.append("")
     lines.append(f"testable = pairs with >= {result['min_n']} ordered observations from "
                  f">= {result['min_routes']} distinct routes")
+    lines.append("med n    = median STRICTLY-ORDERED observations per pair; 0 means most pairs "
+                 "are same-step or materially forced, not that the pair is unseen")
+    lines.append("<=1 obs  = fraction of pairs with at most one ordered observation — the "
+                 "recurrence problem, quantified")
+    lines.append("obs/route= ordered observations per contributing route at the testable "
+                 "pairs; ~1 means route clustering has almost nothing to correct")
     lines.append("env div  = distinct reacting environments per occurrence among the busiest "
-                 "keys; high means the key is not pooling, low means it is")
+                 "keys; HIGH means the key pools unrelated chemistry, low means it is specific")
     return "\n".join(lines)
 
 
@@ -210,7 +220,8 @@ def main(argv=None) -> int:
 
     def _run(label: str, paths: Sequence[str]) -> None:
         log.warning("sweeping %s over %d file(s)", label, len(paths))
-        results[label] = sweep(iter_center_files(paths), forced=forced, limit=args.limit,
+        results[label] = sweep(lambda _p=list(paths): iter_center_files(_p),
+                               forced=forced, limit=args.limit,
                                min_n=args.min_n, min_routes=args.min_routes,
                                collisions=not args.no_collisions)
         print(f"\n=== {label} ===")
