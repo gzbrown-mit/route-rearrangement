@@ -28,3 +28,7 @@ results_*/
 candidates*.jsonl
 *.html
 _imgs_*/
+
+# Stray shell artifacts
+nul
+*.out
