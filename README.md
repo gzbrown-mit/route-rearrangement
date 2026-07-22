@@ -113,26 +113,147 @@ discriminate between them — every metric here is **order-sensitive**, and each
 
 Every metric scores the route **as a whole** — its feasibility and in-lab applicability —
 not the complexity of any one molecule in isolation. Most decision-relevant is **whole-route
-feasibility / in-lab applicability** (`exposure`, `competing`, `isolability`,
+feasibility / in-lab applicability** (`exposure`, `selectivity`, `isolability`,
 `carried_complexity`): does the sequence hold together and can a chemist run it at the bench?
 `treelstm`/`plausibility` add learned whole-route likeness.
 
 | # | metric | family | source | what it measures |
 |---|--------|--------|--------|------------------|
 | 1 | `exposure` | route/lab | `synthesis_extraction.dependency.exposure` | bystander functional groups exposed to destroying conditions (protections the ordering forces) |
-| 2 | `competing` | route/lab | rxnutils SMARTS | competing reactivity sites: reactive groups present but not reacting (selectivity liabilities), incl. leaving groups exposed to a condensation |
+| 2 | `selectivity` | route/lab | **condensed Fukui indices** (RDKit `rdEHTTools`, native) | **is each step aimed at the most reactive copy of its transformation?** Frontier-electron density (LUMO = electrophilic site, HOMO = nucleophilic site) at the reacting atom vs. every rival site on the same substrate; `score = -Σ (1-margin)/2` = the frontier density landing on the wrong site. Feature-based end to end — see below |
 | 3 | `isolability` | route/lab | RDKit SMARTS (native) | **bench-handleability of the isolated intermediates**: unstable/hazardous groups (acyl halides, azides, peroxides, isocyanates, aldehydes, epoxides, boronic acids, …) that a given ordering forces you to isolate, purify and store |
 | 4 | `carried_complexity` | route/lab | RDKit heavy-atom counts (native) | **"build complexity late"**: mass installed early is carried through — and risked by — every downstream step (`Σ max(Δheavy,0)·steps-remaining`); rewards convergent, late-stage assembly |
 | 5 | `treelstm` | learned | [moyiming1 Tree-LSTM](https://github.com/moyiming1/Retrosynthesis-pathway-ranking) (cloned into `external/`) | learned whole-tree literature-likeness |
 | 6 | `plausibility` | learned | miniASKCOS pistachio template-relevance (~900 MB model, opt-in `--plausibility`) | learned per-reaction plausibility: does a known template reproduce each rearranged reaction? |
 
-`isolability` and `carried_complexity` are RDKit-only, so they are always available (no model
-download) and never depend on the miniASKCOS/torch stack.
+`selectivity`, `isolability` and `carried_complexity` are RDKit-only, so they are always
+available (no model download) and never depend on the miniASKCOS/torch stack.
 
-> **Removed:** the per-molecule complexity metrics `complexity` (SCScore) and `accessibility`
-> (SAscore) scored each intermediate *in isolation* — a property of one structure, not of the
-> route holding together — so they are no longer part of the workflow. Their modules remain in
-> `route_rearrangement/metrics/` (unwired) should you want to re-enable them.
+### `selectivity` — computed electronics, not an extracted rule
+
+Tier 2 ranks routes; it should do so from **features of the molecules**, not from a curated
+vocabulary of functional groups. `selectivity` ([selectivity.py](route_rearrangement/metrics/selectivity.py),
+on the descriptor layer in [electronic.py](route_rearrangement/metrics/electronic.py)) asks the
+question a chemist actually asks of a rearranged step — *is the site I am aiming at still the
+most reactive copy of this transformation on this molecule?* — and answers it by comparing
+numbers on atoms:
+
+* **the site** = the atoms whose bonding changes between the two halves of the step's own
+  retro template. Nothing is named or classified;
+* **the descriptor** = condensed Fukui indices from an extended-Hückel calculation
+  (`rdEHTTools` reduced charge matrix): `f+` = LUMO density = how electrophilic that atom is,
+  `f-` = HOMO density = how nucleophilic. Fukui's own frontier-electron theory, no QM install,
+  0.04–0.25 s per intermediate, cached on canonical SMILES (an enumeration re-walks the same
+  molecules constantly, so the cache carries most of the cost);
+* **the rivals** = other places the same template matches, plus other atoms sharing the
+  reacting atom's radius-1 environment — labelled `symmetry_equivalent` (over-reaction risk,
+  e.g. bis-acylating a symmetric diamine) or `distinct` (regio-/chemoselectivity risk);
+* **the margin** = `(f_site - f_rival)/(f_site + f_rival)`: 1 when the site is the only copy,
+  0 for a coin flip between two equally reactive copies, negative when a rival is hotter.
+
+**Protecting-group strategy falls out of the descriptor rather than being encoded.** Acylating
+1,4-diaminobutane scores a 0.5 penalty (two equally reactive amines); Boc one of them and the
+penalty is 0 — with no rule anywhere saying that Boc protects an amine.
+
+Each reading also records **`activation`** — the site's density as a fraction of the hottest
+atom in the molecule for that mode. That is feasibility, not selectivity, so it stays out of
+the score, but it is the number that collapses when an ordering strips a site's activating
+group: SNAr on 4-fluoronitrobenzene reads `activation = 0.17`, and on the aniline you get by
+reducing the nitro first, `0.0002`. That is `nitro_snar_reduction` (the Tier 1 motif) recovered
+from the wavefunction, and it is the intended feature-based successor to the Tier 1 activation
+checks.
+
+Backend swap: `electronic.QM_BACKEND` takes any callable with the same signature, so xTB/DFT
+finite-difference Fukui can replace extended-Hückel without touching a consumer. Known scope
+limit: a rival must share the reacting atom's element, so a phenol competing with an amine is
+not yet seen — that needs a generalized reaction pattern (the FrequenTree template ladder
+already used by `literature_precedent`), not a hand-written heteroatom rule.
+
+#### Calibration on PaRoutes n1 (200 trees, 3,006 routes, 19,668 steps)
+
+n1 rather than n5: one route per target, so every tree is an independent observation. Two
+systematic defects surfaced and were fixed; the literature ordering's standing among its own
+rearrangements is the calibration signal, since those syntheses were published and worked.
+
+| | worst-of-both modes | operative mode + floor |
+|---|---:|---:|
+| median activation of the scored mode | 0.185 | **1.000** |
+| steps scored in the mode the site is *absent* from | 59% | 0% (6% abstain) |
+| steps with `margin < 0` (mostly 1e-4 vs 1e-1 noise) | 21.9% | **9.3%** |
+| mode split electrophile : nucleophile | 17392 : 2276 | 10072 : 8418 |
+| literature ordering is best of its own orderings | 76/172 | **99/172** |
+| literature mean percentile | 0.662 | **0.743** |
+
+The **survivor gate** was the second fix: sampling the flagged steps showed symmetric
+*reagents* — POCl₃, Br₂, Boc anhydride, thionyl chloride, Lawesson's — being charged 0.5
+apiece for equivalent sites they then consume. Gating rivals on survival into the product
+drops 1,968 rivals (`symmetry_equivalent` 1738 → 479) and the mean penalty per step from
+0.146 to 0.087, while keeping the mono-acylated-diamine case at 0.5 and the bis-acylated one
+at 0.
+
+That gate *lowers* the literature's mean percentile, 0.743 → 0.719 (21 trees worse, 10 better,
+sign test p ≈ 0.011) — and it was kept anyway. The trees it "hurts" are ones like `n1-15`,
+where the literature route was being charged 0.41 twice for the three equivalent chlorines of
+POCl₃; removing a confound that happened to flatter the literature is not a regression.
+Reagent symmetry is not selectivity, and the percentile is a proxy, not ground truth for this
+term. `n1-15` also shows the gate doing positive work: a bromination that scored 0.50 against
+Br₂'s *own second bromine* now scores 0.36 against a genuine rival ring position.
+
+Where the metric sits against the others on this corpus (literature best / mean percentile):
+`isolability` 168/172, 0.983 · `selectivity` 99/172, 0.743 · `exposure` 66/172, 0.765 ·
+`treelstm` 36/172, 0.596 · `carried_complexity` 16/172, 0.390. That last one is an open
+question of its own: on `slice_0-1000` the literature sat at the 95th percentile on
+`carried_complexity`, and on n1 it is *below* median — 87% of n1 records involve
+convergence-point migration, which systematically favours late assembly.
+
+Two measured caveats for the descriptor itself:
+
+* **conformer sensitivity is structure-dependent.** Across five ETKDG seeds, rigid aromatic
+  intermediates move ≤0.02 in per-atom `f+` and ≤0.04 eV in gap, but a flexible aliphatic
+  intermediate moved 0.265 with its molecular `f+` max swinging 0.48–0.73. Within-molecule
+  margins largely cancel this; `activation` does not. Averaging over ~3 conformers for
+  molecules with >4 rotatable bonds is the obvious mitigation.
+* **Fukui is electronic only**, so a steric term was added (below). Conformer averaging was
+  not: it is the lower-value of the two, since a shared geometry cancels much of the error in
+  a within-molecule margin.
+
+#### The steric term
+
+Extended Hückel needs 3D coordinates, and Fukui indices say nothing about approach — two
+amines of equal HOMO density read as equally reactive whether one sits on a CH₂ and the other
+on a quaternary carbon. The bulk feature is `heavy_atoms_decay` **borrowed from**
+`synthesis_extraction.step_classification.descriptors`, called directly rather than
+re-implemented (it keys on atom maps, so the anchor is stamped with a scratch map number and
+restored). A rival's frontier density is discounted by
+`exp(-STERIC_LAMBDA · (bulk_rival − bulk_site))`, clamped, so only the site-to-rival
+*difference* enters and the comparison stays within one molecule. `margin_electronic` is
+recorded next to `margin`, keeping the two contributions separable.
+
+`STERIC_LAMBDA = 3.6` is calibrated rather than chosen: the measured bulk gap between the two
+amines of 2-methylpropane-1,2-diamine is 0.171, and `ln((1+0.3)/(1−0.3))/0.171 = 3.6` places
+that textbook case at margin ≈ 0.3. `STERIC_CLAMP = 1.5` caps the adjustment at 4.5×, so a
+rival buried in a scaffold can never override the electronics outright.
+
+**On n1 it is calibration-neutral.** It moves the margin on 16.6% of steps (mean shift +0.018),
+and the literature's mean percentile goes 0.719 → 0.703 — 15 trees better, 16 worse, sign test
+p ≈ 0.86. So it neither helps nor harms the corpus-level proxy while being demonstrably right
+on the cases it was built for. It is kept for that reason, and because the proxy cannot see a
+term that only fires on sterically differentiated rival pairs, which this corpus of
+heteroaromatic couplings has few of.
+
+It is also free. Computing bulk unconditionally took a full-corpus re-score from 160 s to
+398 s; skipping it when a step has no rival (78% of them) brings that back to **160 s with
+all 3,006 scores bit-identical** — the same cost as the electronic-only version. Re-scoring
+selectivity offline from `routes.jsonl` like this, without re-running the pipeline, is how the
+metric should be iterated: minutes per experiment instead of the ~30 min a full pass takes.
+
+> **Removed:** `competing` (rxnutils SMARTS library) asked whether a *named* sensitive group
+> was present rather than whether the intended site was electronically preferred — an
+> extracted-rule metric in a tier that should be feature-based; `selectivity` replaces it. The
+> per-molecule metrics `complexity` (SCScore) and `accessibility` (SAscore) scored each
+> intermediate *in isolation* — a property of one structure, not of the route holding together.
+> All three modules remain in `route_rearrangement/metrics/` (unwired; `competing` still backs
+> a GUI label fallback) should you want to re-enable them.
 
 `score.py` reports, per original route and metric: the original ordering's value and its
 **percentile among the rearrangements**, the best/worst rearrangement, how many

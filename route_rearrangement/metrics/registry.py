@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 
 from . import METRIC_NAMES
 from . import carried_complexity as _cc
-from . import competing as _comp
+from . import selectivity as _sel
 from . import isolability as _iso
 from .exposure import ExposureScorer
 from .plausibility import PlausibilityScorer
@@ -22,11 +22,11 @@ from .treelstm import TreeLSTMRanker
 
 class MetricSuite:
     def __init__(self, *, use_treelstm=True, use_plausibility=False, use_exposure=True,
-                 use_competing=True, use_isolability=True, use_carried_complexity=True,
+                 use_selectivity=True, use_isolability=True, use_carried_complexity=True,
                  matrix=None):
         self.flags = {
             "treelstm": use_treelstm, "plausibility": use_plausibility,
-            "exposure": use_exposure, "competing": use_competing,
+            "exposure": use_exposure, "selectivity": use_selectivity,
             "isolability": use_isolability, "carried_complexity": use_carried_complexity,
         }
         self.treelstm = TreeLSTMRanker() if use_treelstm else None
@@ -40,7 +40,7 @@ class MetricSuite:
                 "treelstm": bool(self.treelstm and self.treelstm.available),
                 "plausibility": bool(self.plausibility and self.plausibility.available),
                 "exposure": bool(self.exposure),
-                "competing": self.flags["competing"] and _comp.available(),
+                "selectivity": self.flags["selectivity"] and _sel.available(),
                 "isolability": self.flags["isolability"] and _iso.available(),
                 "carried_complexity": self.flags["carried_complexity"] and _cc.available(),
             }
@@ -62,8 +62,8 @@ class MetricSuite:
             if avail["exposure"]:
                 blocks[i]["exposure"] = self.exposure.score(
                     tree_id, full_graph, rec["ordering"]) or {"available": False}
-            if avail["competing"]:
-                blocks[i]["competing"] = _comp.competing_sites(rec) or {"available": False}
+            if avail["selectivity"]:
+                blocks[i]["selectivity"] = _sel.selectivity(rec) or {"available": False}
             if avail["isolability"]:
                 blocks[i]["isolability"] = _iso.isolability(rec) or {"available": False}
             if avail["carried_complexity"]:

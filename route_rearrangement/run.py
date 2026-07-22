@@ -56,7 +56,7 @@ def process_route(tree_id: str, tree_graph, *, engine: str = "dfs", cap: int = 5
     ``"material"`` keeps only the hard atom-based edges — you cannot transform atoms a
     later step has not installed yet — and lets the soft chemistry be *scored* instead
     of *gated*: the freed orderings are still vetoed by the retro-template no-match and
-    priced by the ``exposure``/``competing`` metrics."""
+    priced by the ``exposure``/``selectivity`` metrics."""
     summary = {"tree_id": tree_id, "status": "ok", "n_steps": 0, "n_orders": 0,
                "orderings_tried": 0, "accepted": 0, "duplicates": 0,
                "identity_roundtrip": False, "is_linear": True,
